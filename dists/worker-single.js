@@ -456,8 +456,16 @@ var BUILTIN_OVERRIDE = [
 ];
 var KV_KEY = "rules:data";
 var KV_MAX_BYTES = 8 * 1024 * 1024;
+var FAIL_COOLDOWN_MS = 3e4;
+var failUntil = 0;
 var live = null;
 var coldInflight = null;
+function noteFailure() {
+  failUntil = Date.now() + FAIL_COOLDOWN_MS;
+}
+function inFailureWindow() {
+  return Date.now() < failUntil;
+}
 function parseRuleText(text) {
   const plain = [];
   const full = /* @__PURE__ */ new Set();
@@ -536,6 +544,7 @@ async function ensureRules(env, fetcher = fetch) {
     const fromKv = await ensureFromKv(env.RULES_KV);
     if (fromKv) return fromKv;
   }
+  if (inFailureWindow()) return null;
   if (!coldInflight) {
     const rulesUrl = env.RULES_URL || DEFAULT_RULES_URL;
     coldInflight = (async () => {
@@ -550,6 +559,7 @@ async function ensureRules(env, fetcher = fetch) {
         }
         return live;
       } catch {
+        noteFailure();
         return null;
       }
     })().finally(() => {
@@ -571,12 +581,14 @@ async function refreshRules(env, fetcher = fetch) {
     }
     return true;
   } catch {
+    noteFailure();
     return false;
   }
 }
 function resetRules() {
   live = null;
   coldInflight = null;
+  failUntil = 0;
 }
 
 // src/filter.js
@@ -619,8 +631,10 @@ function matches(qname, rule) {
 function isBlocked(qname, rule) {
   return matches(qname, rule);
 }
+var disabled = false;
 async function ensureBlock(env, fetcher = fetch) {
   if (live2) return live2;
+  if (!env.BLOCK_URL && disabled) return null;
   if (env.BLOCK_KV) {
     try {
       const raw = await env.BLOCK_KV.get(KV_KEY2);
@@ -634,7 +648,10 @@ async function ensureBlock(env, fetcher = fetch) {
     }
   }
   const url = env.BLOCK_URL || "";
-  if (!url) return null;
+  if (!url) {
+    disabled = true;
+    return null;
+  }
   if (!coldInflight2) {
     coldInflight2 = (async () => {
       try {
@@ -665,6 +682,7 @@ async function ensureBlock(env, fetcher = fetch) {
 function resetBlock() {
   live2 = null;
   coldInflight2 = null;
+  disabled = false;
 }
 async function refreshBlock(env, fetcher = fetch) {
   const url = env.BLOCK_URL || "";
@@ -774,7 +792,7 @@ function rdataString(type, rd, off, len, nameReader) {
       return Array.from(rd).slice(0, Math.min(rd.length, 64)).map((x) => x.toString(16).padStart(2, "0")).join("");
   }
 }
-function toJsonResponse(wire, qname, qtypeName, clientAd) {
+function toJsonResponse(wire, qname, qtypeName) {
   if (!wire || wire.length < 12) {
     return { Status: 2, RA: false, Question: [{ name: qname, type: qtypeName }] };
   }
@@ -1057,6 +1075,13 @@ function dnsResponse(body, extraHeaders) {
     }
   });
 }
+function isValidQname(name) {
+  if (typeof name !== "string" || name.length === 0 || name.length > 253) return false;
+  if (name.endsWith(".")) return false;
+  const labels = name.split(".");
+  if (labels.some((l) => l.length === 0 || l.length > 63)) return false;
+  return /^[a-zA-Z0-9_.-]+$/.test(name) && !name.includes("..");
+}
 function buildWireQuery(name, type) {
   const qname = name.toLowerCase();
   const labels = qname.split(".").filter((l) => l.length > 0).map((l) => new TextEncoder().encode(l));
@@ -1211,7 +1236,7 @@ async function handleJsonQuery(request, url, env, config) {
   const qname = url.searchParams.get("name");
   const typeName = (url.searchParams.get("type") || "A").toUpperCase();
   const qtype = QTYPE_STR[typeName] ?? 1;
-  if (!qname || !/^[a-zA-Z0-9_.-]+$/.test(qname)) {
+  if (!qname || !isValidQname(qname)) {
     return jsonResponse({ Status: 2, Question: [{ name: qname || "", type: typeName }] });
   }
   const wireQuery = buildWireQuery(qname, qtype);
@@ -1231,8 +1256,7 @@ async function handleJsonQuery(request, url, env, config) {
   } catch {
     minTtl = 0;
   }
-  const clientAd = false;
-  const json = toJsonResponse(outcome.answer, qname, typeName, clientAd);
+  const json = toJsonResponse(outcome.answer, qname, typeName);
   const resp = jsonResponse(json, minTtl);
   if (outcome.meta) {
     for (const [k, v] of Object.entries(outcome.meta)) resp.headers.set(k, v);

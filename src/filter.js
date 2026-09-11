@@ -62,9 +62,16 @@ export function isBlocked(qname, rule) {
   return matches(qname, rule);
 }
 
+// Once true, no blocklist URL is configured; we remember this so we never re-read
+// KV or attempt a fetch on later queries (the KV mirror can only be populated by
+// an upstream BLOCK_URL, so a missing URL means it stays empty indefinitely).
+let disabled = false;
+
 /** ensureBlock: best-available blocklist (KV durable + cold-start fetch). */
 export async function ensureBlock(env, fetcher = fetch) {
   if (live) return live;
+  // If we already determined there's no source, bail out fast.
+  if (!env.BLOCK_URL && disabled) return null;
 
   if (env.BLOCK_KV) {
     try {
@@ -81,7 +88,10 @@ export async function ensureBlock(env, fetcher = fetch) {
   }
 
   const url = env.BLOCK_URL || "";
-  if (!url) return null; // no blocklist configured
+  if (!url) {
+    disabled = true; // determined: no blocklist source
+    return null;
+  }
 
   if (!coldInflight) {
     coldInflight = (async () => {
@@ -116,6 +126,7 @@ export async function ensureBlock(env, fetcher = fetch) {
 export function resetBlock() {
   live = null;
   coldInflight = null;
+  disabled = false;
 }
 
 /** Cron handler: refresh the blocklist in background; keep old on any failure. */

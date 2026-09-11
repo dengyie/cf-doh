@@ -77,6 +77,16 @@ function dnsResponse(body, extraHeaders) {
   });
 }
 
+/** Validate a DNS name for the JSON API: per-label length <= 63, total <= 253,
+ *  no empty/leading-dot labels, ASCII allowed charset. */
+function isValidQname(name) {
+  if (typeof name !== "string" || name.length === 0 || name.length > 253) return false;
+  if (name.endsWith(".")) return false; // we normalize names without trailing dot
+  const labels = name.split(".");
+  if (labels.some((l) => l.length === 0 || l.length > 63)) return false;
+  return /^[a-zA-Z0-9_.-]+$/.test(name) && !name.includes("..");
+}
+
 /** Build a minimal DNS wire query (one question, RD=1) from a name + type. */
 function buildWireQuery(name, type) {
   const qname = name.toLowerCase();
@@ -281,7 +291,7 @@ async function handleJsonQuery(request, url, env, config) {
   const qname = url.searchParams.get("name");
   const typeName = (url.searchParams.get("type") || "A").toUpperCase();
   const qtype = QTYPE_STR[typeName] ?? 1;
-  if (!qname || !/^[a-zA-Z0-9_.-]+$/.test(qname)) {
+  if (!qname || !isValidQname(qname)) {
     return jsonResponse({ Status: 2, Question: [{ name: qname || "", type: typeName }] });
   }
 
@@ -305,9 +315,9 @@ async function handleJsonQuery(request, url, env, config) {
   } catch {
     minTtl = 0;
   }
-  // For a query we built ourselves there is no client EDNS OPT, so AD stays off.
-  const clientAd = false;
-  const json = toJsonResponse(outcome.answer, qname, typeName, clientAd);
+  // AD reflects whatever the masked wire answer carries (JSON clients don't send
+  // EDNS DO, so resolveAndRelay already cleared AD — nothing to override here).
+  const json = toJsonResponse(outcome.answer, qname, typeName);
   const resp = jsonResponse(json, minTtl);
   if (outcome.meta) {
     for (const [k, v] of Object.entries(outcome.meta)) resp.headers.set(k, v);

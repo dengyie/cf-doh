@@ -109,8 +109,11 @@ function rdataString(type, rd, off, len, nameReader) {
 /**
  * Convert a DoH wire response to JSON object per the Google-style schema.
  * `qname`/`qtype` are from the original request (client-facing, preserves case).
+ * The AD field is derived from the wire answer's flag bits — the caller is
+ * responsible for masking AD (see worker's applyRelayedDnssec) so it only ever
+ * reflects data the client actually requested.
  */
-export function toJsonResponse(wire, qname, qtypeName, clientAd) {
+export function toJsonResponse(wire, qname, qtypeName) {
   if (!wire || wire.length < 12) {
     return { Status: 2, RA: false, Question: [{ name: qname, type: qtypeName }] };
   }
