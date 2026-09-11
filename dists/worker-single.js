@@ -12,7 +12,13 @@ var DEFAULT = {
   maxResponseBytes: 65535,
   maxTtlSeconds: 3600,
   cacheTtlSeconds: 300,
-  rulesRefreshMin: 15
+  rulesRefreshMin: 15,
+  dnssec: true,
+  // 感知/透传 DNSSEC（上游置 AD 且客户端请求过 DO 才回 AD 位）
+  blockAction: "nxdomain",
+  // 过滤命中响应: nxdomain|zero(null 0.0.0.0/::)|passthrough
+  jsonPath: "/json"
+  // 兼容 Google 风格的 DoH JSON API（GET ?name=&type=）
 };
 function asSingle(s, fallback) {
   if (!s) return fallback;
@@ -46,7 +52,16 @@ function readConfig(env) {
     rulesUrl: asSingle(env.RULES_URL, DEFAULT.rulesUrl),
     rulesCacheMin: parseUint(env.RULES_CACHE_MIN, DEFAULT.rulesMin, 1, 1440),
     token: asSingle(env.DOH_TOKEN, ""),
-    pageUrl: asSingle(env.PAGE_URL, "")
+    pageUrl: asSingle(env.PAGE_URL, ""),
+    dnssec: String(env.DNSSEC ?? "").trim() === "" ? DEFAULT.dnssec : String(env.DNSSEC).trim() !== "0" && String(env.DNSSEC).trim().toLowerCase() !== "false",
+    blockAction: (() => {
+      const v = asSingle(env.BLOCK_ACTION, DEFAULT.blockAction).toLowerCase();
+      return ["nxdomain", "zero", "passthrough"].includes(v) ? v : DEFAULT.blockAction;
+    })(),
+    jsonPath: (() => {
+      const p = asSingle(env.JSON_PATH, DEFAULT.jsonPath);
+      return p.startsWith("/") ? p : `/${p}`;
+    })()
   };
   return config;
 }
@@ -201,6 +216,12 @@ function buildErrorResponse(fromBuf, rcode, question) {
   }
   return out;
 }
+function writeU32(buf, off, value) {
+  buf[off] = value >>> 24 & 255;
+  buf[off + 1] = value >>> 16 & 255;
+  buf[off + 2] = value >>> 8 & 255;
+  buf[off + 3] = value & 255;
+}
 function validateUpstreamResponse(answerBuf, originalInfo) {
   if (answerBuf.length < 12) throw new DnsFormatError("answer_too_short");
   const answerId = answerBuf[0] << 8 | answerBuf[1];
@@ -211,6 +232,53 @@ function validateUpstreamResponse(answerBuf, originalInfo) {
   if ((flags & 32768) === 0) throw new DnsFormatError("not_response");
   if ((flags & 512) !== 0) throw new DnsFormatError("truncated");
   return flags;
+}
+var TYPE_A = 1;
+var TYPE_AAAA = 28;
+function buildZeroResponse(fromBuf, parsed) {
+  const q = parsed.question;
+  const qtype = q.qtype;
+  const isAaaa = qtype === TYPE_AAAA;
+  const keep = isAaaa ? TYPE_AAAA : TYPE_A;
+  const addr = isAaaa ? new Uint8Array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]) : new Uint8Array([0, 0, 0, 0]);
+  const questionLen = q.questionEnd - q.questionStart;
+  const ansNameLen = 2;
+  const outLen = HEADER_LEN + questionLen + (2 + 10 + addr.length);
+  const out = new Uint8Array(outLen);
+  const id = readU16(fromBuf, HDR_ID);
+  const reqFlags = readU16(fromBuf, HDR_FLAGS);
+  const rd = reqFlags & 256;
+  const flags = 32768 | reqFlags & 30720 | rd | 128;
+  writeU16(out, HDR_ID, id);
+  writeU16(out, HDR_FLAGS, flags);
+  writeU16(out, HDR_QDCOUNT, 1);
+  writeU16(out, 6, 1);
+  writeU16(out, 8, 0);
+  writeU16(out, HDR_ARCOUNT, 0);
+  out.set(fromBuf.subarray(q.questionStart, q.questionEnd), HEADER_LEN);
+  let o = HEADER_LEN + questionLen;
+  out[o] = 192;
+  out[o + 1] = 12;
+  o += 2;
+  writeU16(out, o, keep);
+  writeU16(out, o + 2, 1);
+  writeU32(out, o + 4, 60);
+  writeU16(out, o + 8, addr.length);
+  out.set(addr, o + 10);
+  return out;
+}
+var FLAG_AD = 32;
+function applyRelayedDnssec(answerBuf, clientRequestedDnssec2) {
+  const cur = readU16(answerBuf, 2);
+  let next = cur;
+  if (!clientRequestedDnssec2) {
+    next &= ~FLAG_AD;
+  }
+  writeU16(answerBuf, 2, next);
+  return next;
+}
+function clientRequestedDnssec(parsed) {
+  return Boolean(parsed && parsed.opt);
 }
 function answerTtlSeconds(buf, info) {
   const toU32At = (o) => o + 3 < buf.length ? (buf[o] & 255) << 24 | (buf[o + 1] & 255) << 16 | (buf[o + 2] & 255) << 8 | buf[o + 3] & 255 : 0;
@@ -511,6 +579,280 @@ function resetRules() {
   coldInflight = null;
 }
 
+// src/filter.js
+var DEC2 = new TextDecoder("latin1");
+var ENC2 = new TextEncoder();
+var KV_KEY2 = "block:data";
+var live2 = null;
+var coldInflight2 = null;
+function parseRuleText2(text) {
+  const plain = [];
+  const full = /* @__PURE__ */ new Set();
+  const regexp = [];
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#") || line.startsWith("//")) continue;
+    if (line.startsWith("full:")) {
+      full.add(line.slice(5).trim().toLowerCase());
+    } else if (line.startsWith("regexp:")) {
+      regexp.push(new RegExp(line.slice(7).trim(), "i"));
+    } else {
+      plain.push(line.toLowerCase());
+    }
+  }
+  plain.sort();
+  return { plain, full, regexp, version: text.length };
+}
+function matches(qname, rule) {
+  const q = qname.toLowerCase();
+  if (!rule) return false;
+  if (rule.full.has(q)) return true;
+  for (let i = 0; i < rule.plain.length; i += 1) {
+    const p = rule.plain[i];
+    if (q === p || q.endsWith(`.${p}`)) return true;
+  }
+  for (let i = 0; i < rule.regexp.length; i += 1) {
+    if (rule.regexp[i].test(q)) return true;
+  }
+  return false;
+}
+function isBlocked(qname, rule) {
+  return matches(qname, rule);
+}
+async function ensureBlock(env, fetcher = fetch) {
+  if (live2) return live2;
+  if (env.BLOCK_KV) {
+    try {
+      const raw = await env.BLOCK_KV.get(KV_KEY2);
+      if (raw) {
+        const bytes = typeof raw === "string" ? ENC2.encode(raw) : raw;
+        const text = DEC2.decode(bytes);
+        live2 = { ...parseRuleText2(text), data: text };
+        return live2;
+      }
+    } catch {
+    }
+  }
+  const url = env.BLOCK_URL || "";
+  if (!url) return null;
+  if (!coldInflight2) {
+    coldInflight2 = (async () => {
+      try {
+        const resp = await fetcher(url, { method: "GET", redirect: "manual" });
+        if (!resp.ok) return null;
+        const ct = (resp.headers.get("content-type") || "").toLowerCase();
+        if (ct.includes("text/html")) return null;
+        const buf = await resp.arrayBuffer();
+        const text = DEC2.decode(buf);
+        const rule = parseRuleText2(text);
+        live2 = { ...rule, data: text };
+        if (env.BLOCK_KV) {
+          try {
+            await env.BLOCK_KV.put(KV_KEY2, new Uint8Array(buf));
+          } catch {
+          }
+        }
+        return live2;
+      } catch {
+        return null;
+      }
+    })().finally(() => {
+      coldInflight2 = null;
+    });
+  }
+  return coldInflight2;
+}
+function resetBlock() {
+  live2 = null;
+  coldInflight2 = null;
+}
+async function refreshBlock(env, fetcher = fetch) {
+  const url = env.BLOCK_URL || "";
+  if (!url) return false;
+  try {
+    const resp = await fetcher(url, { method: "GET", redirect: "manual" });
+    if (!resp.ok) return false;
+    const ct = (resp.headers.get("content-type") || "").toLowerCase();
+    if (ct.includes("text/html")) return false;
+    const buf = await resp.arrayBuffer();
+    const text = DEC2.decode(buf);
+    live2 = { ...parseRuleText2(text), data: text };
+    if (env.BLOCK_KV) {
+      try {
+        await env.BLOCK_KV.put(KV_KEY2, new Uint8Array(buf));
+      } catch {
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// src/jsonapi.js
+var DECODE = new TextDecoder("latin1");
+var TYPE_STR = {
+  1: "A",
+  2: "NS",
+  5: "CNAME",
+  6: "SOA",
+  12: "PTR",
+  15: "MX",
+  16: "TXT",
+  28: "AAAA",
+  33: "SRV",
+  65: "HTTPS"
+};
+function readU162(b, o) {
+  return b[o] << 8 | b[o + 1];
+}
+function toU32(b, o) {
+  return (b[o] & 255) << 24 | (b[o + 1] & 255) << 16 | (b[o + 2] & 255) << 8 | b[o + 3] & 255;
+}
+function readName(b, o) {
+  let out = "";
+  let p = o;
+  let jumped = false;
+  let jumpTo = 0;
+  while (true) {
+    if (p >= b.length) break;
+    const len = b[p];
+    if (len === 0) {
+      p += 1;
+      break;
+    }
+    if ((len & 192) === 192) {
+      if (!jumped) {
+        jumpTo = p + 2;
+        jumped = true;
+      }
+      p = (len & 63) << 8 | b[p + 1];
+      continue;
+    }
+    if (out) out += ".";
+    for (let i = 1; i <= len; i++) out += String.fromCharCode(b[p + i] & 255);
+    p += len + 1;
+  }
+  return { name: out, end: jumped ? jumpTo : p };
+}
+function rdataString(type, rd, off, len, nameReader) {
+  switch (type) {
+    case 1:
+      return rd.length >= 4 ? `${rd[0]}.${rd[1]}.${rd[2]}.${rd[3]}` : "";
+    case 28: {
+      if (rd.length < 16) return "";
+      const h = [];
+      for (let i = 0; i < 8; i++) h.push((rd[i * 2] << 8 | rd[i * 2 + 1]).toString(16));
+      return h.join(":");
+    }
+    case 5:
+    case 2:
+    case 12: {
+      const r = readName(rd, 0);
+      return r.name;
+    }
+    case 16:
+      return rd.length ? JSON.stringify(DECODE.decode(rd)) : "";
+    case 15: {
+      if (rd.length < 2) return "";
+      const pref = readU162(rd, 0);
+      const r = readName(rd, 2);
+      return `${pref} ${r.name}`;
+    }
+    case 6: {
+      if (rd.length < 40) return "";
+      const mname = readName(rd, 0);
+      const rname = readName(rd, mname.end);
+      const ser = toU32(rd, rname.end);
+      const refresh = toU32(rd, rname.end + 4);
+      const retry2 = toU32(rd, rname.end + 8);
+      const expire = toU32(rd, rname.end + 12);
+      const mini = toU32(rd, rname.end + 16);
+      return `${mname.name} ${rname.name} ${ser} ${refresh} ${retry2} ${expire} ${mini}`;
+    }
+    default:
+      return Array.from(rd).slice(0, Math.min(rd.length, 64)).map((x) => x.toString(16).padStart(2, "0")).join("");
+  }
+}
+function toJsonResponse(wire, qname, qtypeName, clientAd) {
+  if (!wire || wire.length < 12) {
+    return { Status: 2, RA: false, Question: [{ name: qname, type: qtypeName }] };
+  }
+  const flags = readU162(wire, 2);
+  const qd = readU162(wire, 4);
+  const an = readU162(wire, 6);
+  const ns = readU162(wire, 8);
+  const ar = readU162(wire, 10);
+  const rc = flags & 15;
+  const rd = !!(flags & 256);
+  const ra = !!(flags & 128);
+  const ad = !!(flags & 32);
+  const tc = !!(flags & 512);
+  const cd = !!(flags & 16);
+  const questions = [];
+  let p = 12;
+  for (let i = 0; i < qd; i++) {
+    const { name, end } = readName(wire, p);
+    const t = readU162(wire, end);
+    questions.push({ name, type: TYPE_STR[t] || `TYPE${t}` });
+    p = end + 4;
+  }
+  const collect = (count) => {
+    const arr = [];
+    for (let i = 0; i < count; i++) {
+      const { name, end } = readName(wire, p);
+      p = end;
+      if (p + 10 > wire.length) break;
+      const t = readU162(wire, p);
+      const cl = readU162(wire, p + 2);
+      const ttl = toU32(wire, p + 4);
+      const len = readU162(wire, p + 8);
+      p += 10;
+      if (p + len > wire.length) break;
+      const rd2 = Array.from(wire.subarray(p, p + len));
+      p += len;
+      const typeName = TYPE_STR[t] || `TYPE${t}`;
+      arr.push({
+        name,
+        type: typeName,
+        ...t === 1 || t === 28 ? { TTL: ttl, data: rdataString(t, rd2, p, len, readName) } : {}
+      });
+      if (t !== 1 && t !== 28) {
+        arr[arr.length - 1].TTL = ttl;
+        arr[arr.length - 1].data = rdataString(t, rd2, p, len, readName);
+      }
+    }
+    return arr;
+  };
+  const answers = collect(an);
+  const authority = collect(ns);
+  const additional = collect(ar);
+  return {
+    Status: rc,
+    TC: tc,
+    RD: rd,
+    RA: ra,
+    AD: ad,
+    CD: cd,
+    Question: questions.length ? questions : [{ name: qname, type: qtypeName }],
+    Answer: answers,
+    Authority: authority,
+    Additional: additional
+  };
+}
+function jsonResponse(obj, minTtlSeconds = 0) {
+  const cc = minTtlSeconds > 0 ? `max-age=${minTtlSeconds}` : "no-store";
+  return new Response(JSON.stringify(obj), {
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": cc,
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type"
+    }
+  });
+}
+
 // src/resolver.js
 async function queryUpstream(url, query, { timeoutMs, maxResponseBytes }) {
   const controller = new AbortController();
@@ -678,6 +1020,18 @@ function createCache({ size = DEFAULT_SIZE, now = Date.now } = {}) {
 }
 
 // src/worker.js
+var QTYPE_STR = {
+  A: 1,
+  NS: 2,
+  CNAME: 5,
+  SOA: 6,
+  PTR: 12,
+  MX: 15,
+  TXT: 16,
+  AAAA: 28,
+  SRV: 33,
+  HTTPS: 65
+};
 function decodeBase64Url(value) {
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]*$/.test(value)) return null;
   let v = value.replace(/-/g, "+").replace(/_/g, "/");
@@ -702,6 +1056,27 @@ function dnsResponse(body, extraHeaders) {
       ...extraHeaders || {}
     }
   });
+}
+function buildWireQuery(name, type) {
+  const qname = name.toLowerCase();
+  const labels = qname.split(".").filter((l) => l.length > 0).map((l) => new TextEncoder().encode(l));
+  const qnameLen = labels.reduce((n, b) => n + 1 + b.length, 0) + 1;
+  const out = new Uint8Array(12 + qnameLen + 4);
+  out[2] = 1;
+  out[5] = 1;
+  let o = 12;
+  for (const bytes of labels) {
+    out[o] = bytes.length;
+    out.set(bytes, o + 1);
+    o += 1 + bytes.length;
+  }
+  out[o] = 0;
+  o += 1;
+  out[o] = type >> 8 & 255;
+  out[o + 1] = type & 255;
+  out[o + 2] = 0;
+  out[o + 3] = 1;
+  return out;
 }
 async function readDnsQuery(request, config) {
   const url = new URL(request.url);
@@ -766,6 +1141,9 @@ async function handleRequest(request, env) {
     const submitted = url.searchParams.get("token") || request.headers.get("x-doh-token") || "";
     if (submitted !== config.token) return new Response("Forbidden", { status: 403 });
   }
+  if (url.pathname === config.jsonPath) {
+    return handleJsonQuery(request, url, env, config);
+  }
   const read = await readDnsQuery(request, config);
   if (read.error) {
     metrics.inc("formerr");
@@ -780,29 +1158,89 @@ async function handleRequest(request, env) {
     metrics.inc("formerr");
     return dnsResponse(buildErrorResponse(read.query, 1, null));
   }
+  const outcome = await resolveAndRelay(read.query, parsed, request, env, config);
+  if (!outcome.ok) {
+    metrics.inc("servfail");
+    return dnsResponse(serverFailure(read.query, parsed.question));
+  }
+  metrics.inc("ok");
+  return dnsResponse(outcome.answer, outcome.meta);
+}
+async function resolveAndRelay(wireQuery, parsed, request, env, config) {
+  const qname = parsed.question.name;
   let rules = null;
   try {
     rules = await ensureRules(env);
   } catch {
     rules = null;
   }
-  const domestic = isDomestic(parsed.question.name, rules);
+  const domestic = isDomestic(qname, rules);
+  if (env.BLOCK_URL || env.BLOCK_KV) {
+    const blockRule = await ensureBlock(env);
+    if (isBlocked(qname, blockRule)) {
+      metrics.inc("filter_blocked");
+      const action = config.blockAction;
+      const meta = { "X-DoH-Filter": "blocked" };
+      if (action === "nxdomain") {
+        return { ok: true, answer: buildErrorResponse(wireQuery, 3, parsed.question), meta };
+      }
+      if (action === "zero") {
+        return { ok: true, answer: buildZeroResponse(wireQuery, parsed), meta };
+      }
+    }
+  }
   const subnet = subnetForEcs(
     request.headers.get("cf-connecting-ip"),
     config.ecsV4Prefix,
     config.ecsV6Prefix
   );
   const ecsKey = subnet ? `${subnet.family}:${subnet.network.join(".")}` : "none";
-  const result = await resolveWithCache(parsed, read.query, subnet, ecsKey, url, domestic, config);
-  if (!result) {
-    metrics.inc("servfail");
-    return dnsResponse(serverFailure(read.query, parsed.question));
+  const result = await resolveWithCache(parsed, wireQuery, subnet, ecsKey, domestic, config);
+  if (!result) return { ok: false };
+  let answer = result.answer;
+  if (config.dnssec) {
+    answer = answer.slice();
+    applyRelayedDnssec(answer, clientRequestedDnssec(parsed));
   }
-  metrics.inc("ok");
-  return dnsResponse(result.answer);
+  return { ok: true, answer };
+}
+async function handleJsonQuery(request, url, env, config) {
+  if (request.method !== "GET" && request.method !== "OPTIONS") {
+    return new Response("Method Not Allowed", { status: 405 });
+  }
+  const qname = url.searchParams.get("name");
+  const typeName = (url.searchParams.get("type") || "A").toUpperCase();
+  const qtype = QTYPE_STR[typeName] ?? 1;
+  if (!qname || !/^[a-zA-Z0-9_.-]+$/.test(qname)) {
+    return jsonResponse({ Status: 2, Question: [{ name: qname || "", type: typeName }] });
+  }
+  const wireQuery = buildWireQuery(qname, qtype);
+  let parsed;
+  try {
+    parsed = parseDnsMessage(wireQuery);
+  } catch {
+    return jsonResponse({ Status: 2, Question: [{ name: qname, type: typeName }] });
+  }
+  const outcome = await resolveAndRelay(wireQuery, parsed, request, env, config);
+  if (!outcome.ok) {
+    return jsonResponse({ Status: 2, Question: [{ name: qname, type: typeName }] });
+  }
+  let minTtl = 0;
+  try {
+    minTtl = answerTtlSeconds(outcome.answer, parsed);
+  } catch {
+    minTtl = 0;
+  }
+  const clientAd = false;
+  const json = toJsonResponse(outcome.answer, qname, typeName, clientAd);
+  const resp = jsonResponse(json, minTtl);
+  if (outcome.meta) {
+    for (const [k, v] of Object.entries(outcome.meta)) resp.headers.set(k, v);
+  }
+  return resp;
 }
 var dnsCache = createCache();
-async function resolveWithCache(parsed, query, subnet, ecsKey, url, domestic, config) {
+async function resolveWithCache(parsed, query, subnet, ecsKey, domestic, config) {
   const qname = parsed.question.name;
   const qtype = parsed.question.qtype;
   if (config.cacheTtlSeconds > 0) {
@@ -844,13 +1282,21 @@ var worker_default = {
     } catch {
       metrics.inc("rules_fetch_fail");
     }
+    try {
+      const updated = await refreshBlock(env);
+      metrics.inc(updated ? "block_fetch" : "block_unchanged");
+    } catch {
+      metrics.inc("block_fetch_fail");
+    }
   }
 };
 export {
   DNS_CONTENT_TYPE,
   worker_default as default,
   handleRequest,
+  isBlocked,
   parseDnsMessage,
   readConfig,
+  resetBlock,
   resetRules
 };

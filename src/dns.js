@@ -281,6 +281,96 @@ export function validateUpstreamResponse(answerBuf, originalInfo) {
 
 export { readU16, writeU16, writeU32 };
 
+/** Type for an A (/1) or AAAA (/28) answer used by blackhole responses. */
+const TYPE_A = 1;
+const TYPE_AAAA = 28;
+
+/**
+ * Build a NOERROR "blackhole" response: echoes the question and returns a single
+ * answer of 0.0.0.0 (for A) or :: (for AAAA). Used by BLOCK_ACTION=zero.
+ * Returns a standalone message (ID + RA + copied question + one answer RR).
+ */
+export function buildZeroResponse(fromBuf, parsed) {
+  const q = parsed.question;
+  const qtype = q.qtype;
+  const isAaaa = qtype === TYPE_AAAA;
+  const keep = isAaaa ? TYPE_AAAA : TYPE_A;
+  const addr = isAaaa
+    ? new Uint8Array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+    : new Uint8Array([0, 0, 0, 0]);
+
+  const questionLen = q.questionEnd - q.questionStart;
+  const ansNameLen = 2; // compression pointer C00C to qname
+  const outLen = HEADER_LEN + questionLen + (2 + 10 + addr.length);
+  const out = new Uint8Array(outLen);
+
+  const id = readU16(fromBuf, HDR_ID);
+  const reqFlags = readU16(fromBuf, HDR_FLAGS);
+  const rd = reqFlags & 0x0100;
+  const flags = 0x8000 | (reqFlags & 0x7800) | rd | 0x0080; // QR+RA=1, NOERROR(0)
+  writeU16(out, HDR_ID, id);
+  writeU16(out, HDR_FLAGS, flags);
+  writeU16(out, HDR_QDCOUNT, 1);
+  writeU16(out, 6, 1); // ANCOUNT=1
+  writeU16(out, 8, 0);
+  writeU16(out, HDR_ARCOUNT, 0);
+  out.set(fromBuf.subarray(q.questionStart, q.questionEnd), HEADER_LEN);
+
+  let o = HEADER_LEN + questionLen;
+  out[o] = 0xc0; // pointer
+  out[o + 1] = 0x0c;
+  o += 2;
+  writeU16(out, o, keep); // type
+  writeU16(out, o + 2, 1); // class IN
+  writeU32(out, o + 4, 60); // ttl 60s
+  writeU16(out, o + 8, addr.length); // rdlength
+  out.set(addr, o + 10);
+  return out;
+}
+const FLAG_AA = 0x0400;
+const FLAG_AD = 0x0020; // Authenticated Data
+const FLAG_CD = 0x0010; // Checking Disabled
+// DO (DNSSEC OK) lives in the EDNS(0) OPT TTL high byte (bit 15 of the 4-byte TTL field).
+
+/**
+ * Does the answer carry DNSSEC metadata we can relay? Reads the raw flags word
+ * (from validateUpstreamResponse) and returns { ad, cd, aa } booleans.
+ * `ad` true means the upstream validated DNSSEC for this answer.
+ */
+export function dnssecFlags(flags) {
+  return {
+    ad: (flags & FLAG_AD) !== 0,
+    cd: (flags & FLAG_CD) !== 0,
+    aa: (flags & FLAG_AA) !== 0,
+  };
+}
+
+/**
+ * Recompute the final response header flags when relaying an upstream answer to
+ * a client that may or may not have requested DNSSEC. Standard behavior:
+ *   - The upstream answer may carry AD=1 when it validated DNSSEC. We pass that
+ *     AD bit through untouched to a client that signalled DO (DNSSEC-aware);
+ *     for a non-DO client we clear AD so we never claim authenticated data it
+ *     didn't ask for. We never *set* AD ourselves — that would fabricate
+ *     validated data we did not verify.
+ *   - CD (checking disabled) is carried through untouched.
+ * This mutates `answerBuf`'s flags word in place and returns the new 16-bit flags.
+ */
+export function applyRelayedDnssec(answerBuf, clientRequestedDnssec) {
+  const cur = readU16(answerBuf, 2);
+  let next = cur;
+  if (!clientRequestedDnssec) {
+    next &= ~FLAG_AD; // never claim AD to a client that didn't request DNSSEC
+  }
+  writeU16(answerBuf, 2, next);
+  return next;
+}
+
+/** True if `info` (parseDnsMessage result) indicates the client sent DO via EDNS OPT. */
+export function clientRequestedDnssec(parsed) {
+  return Boolean(parsed && parsed.opt); // OPT present == DNSSEC-capable client
+}
+
 /**
  * Compute the minimum TTL (seconds) across answer + authority records, using
  * the SOA MINIMUM field for negative (NXDOMAIN / NODATA) answers per RFC 2308.

@@ -32,6 +32,13 @@
     "UPSTREAM_TIMEOUT_MS": "3000",
     "MAX_QUERY_BYTES": "4096",
     "MAX_RESPONSE_BYTES": "65535",
-    "CACHE_TTL_SECONDS": "300"
+    "CACHE_TTL_SECONDS": "300",
+    "DNSSEC": "1",
+    "BLOCK_ACTION": "nxdomain",
+    "JSON_PATH": "/json"
+
+    // Optional blocklist: set BLOCK_URL to a plain-text URL (one pattern/line,
+    // supports plain / full:domain / regexp:..). Leave unset to disable filtering.
+    // "BLOCK_URL": "https://example.com/blocklist.txt"
   }
 }

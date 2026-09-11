@@ -19,6 +19,9 @@ const DEFAULT = {
   maxTtlSeconds: 3600,
   cacheTtlSeconds: 300,
   rulesRefreshMin: 15,
+  dnssec: true,        // 感知/透传 DNSSEC（上游置 AD 且客户端请求过 DO 才回 AD 位）
+  blockAction: "nxdomain", // 过滤命中响应: nxdomain|zero(null 0.0.0.0/::)|passthrough
+  jsonPath: "/json", // 兼容 Google 风格的 DoH JSON API（GET ?name=&type=）
 };
 
 function asSingle(s, fallback) {
@@ -56,6 +59,15 @@ export function readConfig(env) {
     rulesCacheMin: parseUint(env.RULES_CACHE_MIN, DEFAULT.rulesMin, 1, 1440),
     token: asSingle(env.DOH_TOKEN, ""),
     pageUrl: asSingle(env.PAGE_URL, ""),
+    dnssec: String(env.DNSSEC ?? "").trim() === "" ? DEFAULT.dnssec : String(env.DNSSEC).trim() !== "0" && String(env.DNSSEC).trim().toLowerCase() !== "false",
+    blockAction: (() => {
+      const v = asSingle(env.BLOCK_ACTION, DEFAULT.blockAction).toLowerCase();
+      return ["nxdomain", "zero", "passthrough"].includes(v) ? v : DEFAULT.blockAction;
+    })(),
+    jsonPath: (() => {
+      const p = asSingle(env.JSON_PATH, DEFAULT.jsonPath);
+      return p.startsWith("/") ? p : `/${p}`;
+    })(),
   };
   return config;
 }
