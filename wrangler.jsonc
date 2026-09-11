@@ -1,0 +1,37 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cf-doh",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-07-27",
+  "workers_dev": true,
+
+  // KV namespace for rule-list durability. Create it first:
+  //   wrangler kv namespace create RULES_KV
+  // then replace the placeholder binding name below. The binding identifier
+  // ("RULES_KV") is what the worker reads via env.RULES_KV.
+  "kv_namespaces": [
+    {
+      "binding": "RULES_KV",
+      "id": "fe4f5aed731d48aa8d879acfef26873a"
+    }
+  ],
+
+  // Cron: refresh the rule list daily (04:17 UTC).
+  "triggers": {
+    "crons": ["17 4 * * *"]
+  },
+
+  "vars": {
+    "DOH_PATH": "/doh",
+    "DOMESTIC_DOH_URL": "https://dns.alidns.com/dns-query",
+    "DOMESTIC_FALLBACK_DOH_URL": "https://doh.pub/dns-query",
+    "GLOBAL_DOH_URL": "https://dns.google/dns-query",
+    "GLOBAL_FALLBACK_DOH_URL": "https://cloudflare-dns.com/dns-query",
+    "ECS_IPV4_PREFIX": "24",
+    "ECS_IPV6_PREFIX": "56",
+    "UPSTREAM_TIMEOUT_MS": "3000",
+    "MAX_QUERY_BYTES": "4096",
+    "MAX_RESPONSE_BYTES": "65535",
+    "CACHE_TTL_SECONDS": "300"
+  }
+}

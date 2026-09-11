@@ -1,0 +1,17 @@
+{
+  "name": "cf-doh",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Self-hosted DNS-over-HTTPS resolver on Cloudflare Workers with domain-based domestic/global split, ECS, and concurrent upstream failover.",
+  "scripts": {
+    "test": "node test/run-all.mjs",
+    "build": "esbuild src/worker.js --bundle --format=esm --platform=browser --target=es2022 --outfile=dists/worker-single.js --log-level=warning",
+    "typecheck": "echo \"no build step; uses plain JS ESM (node --check)\"",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.0",
+    "wrangler": "^4.0.0"
+  }
+}

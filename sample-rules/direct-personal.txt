@@ -1,0 +1,20 @@
+# sample-rules/direct-personal.txt
+# 个人「国内直连」覆盖层 —— 让下面这些站点走国内组(阿里 dns + ECS 出口),
+# 从而能拿到可直连的正确 IP。
+#
+# 用法:
+#   1. 把本文件传到你有静态托管的 raw URL(gist / CF Pages / GitHub raw…)落下。
+#   2. 在 wrangler.jsonc 的 vars 里加一行:  "RULES_URL": "https://…/direct-personal.txt"
+#   3. 重新部署。规则会在首次请求 + 每日 cron 刷新时加载。
+#
+# 格式(每行一个):
+#   裸域名   foo.com   => 后缀匹配(foo.com 及其所有子域)
+#   full:    full:x.com => 仅精确匹配
+#   regexp:  regexp:^ad\.  => 正则匹配完整 qname(忽略大小写)
+#   以 # 或 // 开头的行忽略。
+
+# 核心站点:国内组直连
+linux.do
+
+# 例:github 走国内(若你本地直连 github 更稳)
+full:github.com

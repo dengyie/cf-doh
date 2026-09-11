@@ -1,0 +1,10 @@
+node_modules/
+.wrangler/
+dist/
+*.log
+.DS_Store
+
+# 凭据保护：即使误写真实 token 也绝不入库（扫 CF Token 前缀）
+*CLOUDFLARE_API_TOKEN=*
+*cfk_*
+*cfut_*
