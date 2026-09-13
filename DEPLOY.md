@@ -60,3 +60,13 @@ npx wrangler deploy
 2. 添加您的二级域名（如 `doh.example.com`）；
 3. Cloudflare 会自动配置 DNS 记录并申请权威 SSL 证书；
 4. 客户端填入 `https://doh.example.com/doh` 即可畅享极速解析！
+
+---
+
+## 生产环境最佳实践总结
+
+1. **必须使用自定义域名**：严禁直接将 `*.workers.dev` 作为客户端长期端点，以防运营商 SNI 拦截。
+2. **避免 DNS 死循环**：代理客户端（Mihomo / Clash / Surge）需在 `hosts` 或 `nameserver-policy` 中静态解析 DoH 域名本身。
+3. **保持默认 ECS /24 掩码**：兼顾客户端隐私保护与国内 CDN 就近调度精准度。
+4. **接入 GitHub Actions 每日同步**：配置 `DOH_ENDPOINT` 与 `RULES_SYNC_SECRET` Secrets，享受全自动免维护规则热更新。
+5. **开启 Analytics Engine 监控**：在 Cloudflare Dashboard 点击一次开启，即可跨全球 PoP 观察 P95 延迟与上游健康度。

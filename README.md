@@ -15,9 +15,11 @@
 
 <p align="center">
   <a href="#-痛点与核心特性">核心特性</a> •
+  <a href="#-支持的网站范围与分流模型">支持网站</a> •
   <a href="#-架构图解">架构原理</a> •
   <a href="#-极速部署">极速部署</a> •
   <a href="#-客户端接入配置指南">客户端配置</a> •
+  <a href="#-生产环境最佳实践-best-practices">最佳实践</a> •
   <a href="#-进阶玩法">进阶玩法</a> •
   <a href="#-本地开发与测试">本地测试</a> •
   <a href="#-license">开源许可</a>
@@ -56,6 +58,49 @@
 | **API 兼容性** | 仅标准 DoH | 仅标准 DoH | **✅ RFC 8484 + Google 风格 JSON API + 完整 CORS** |
 | **广告 / 恶意拦截** | 依赖特定 IP | ❌ 无 | **🛡️ 可选 Blocklist 规则拦截（NXDOMAIN / 0.0.0.0）** |
 | **运行时依赖** | - | 部分依赖庞大 npm 包 | **🌱 0 外部运行时依赖，秒级冷启动** |
+
+---
+
+## 🌐 支持的网站范围与分流模型
+
+`cf-doh` 遵循标准 RFC 8484 协议规范，**支持 100% 全网任意合法域名的解析**。其核心实用价值并非简单的“域名白名单”，而是通过四层梯队分流模型，实现**「境内直连精准就近调度」**与**「海外站点原生防污染」**的统一：
+
+```
+                              [ 用户 DNS 查询 ]
+                                      │
+               ┌──────────────────────┴──────────────────────┐
+               ▼                                             ▼
+       【境内直连加速组】                             【全球海外原生组】
+ (阿里云 DNS ⚔️ 腾讯 DNSPod 并发竞速)             (Google DNS ⚔️ Cloudflare 并发竞速)
+  + 注入客户端真实 IP (ECS /24 掩码)               + 原生 Anycast IP + DNSSEC 校验
+               │                                             │
+   ├─ ① 内置核心保障 (linux.do / github)         ├─ ③ 前沿 AI 基础设施 (OpenAI / Claude)
+   ├─ ② 60,000+ 境内生态 (微信/B站/淘宝/大厂云)   ├─ ③ 全球开发生态 (Docker / NPM / PyPI)
+   └─ ④ 自定义热扩展 (自建私有域名/DDNS)          └─ ③ 海外社交流媒体 (YouTube / Google / X)
+```
+
+### 1. 第一梯队：内置核心保障（免配置 · 零依赖冷启动）
+固化在 Worker 运行时层，即便在远端规则源宕机或无法连通的极端情况下，仍享受**国内竞速组永久保底解析**：
+- **Linux.do 全站及子域 (`*.linux.do`)**：双路上游毫秒竞速，解决主站论坛与 CDN 资源在部分地区的超时或连接中断。
+- **GitHub 生态核心 (`github.com`, `*.githubusercontent.com`, `*.githubassets.com`)**：通过国内出口并携带客户端 ECS 解析，获取最优直连 CDN IP，极大改善 `git clone` 速度慢及 README 图片/头像加载失败。
+
+### 2. 第二梯队：60,000+ 境内主流互联网生态（本地 CDN 最优命中）
+默认接入业界权威的 `Loyalsoldier direct-list.txt`（包含 6~8 万条全量中国大陆直连域名），经由阿里 DNS 与腾讯 DNSPod 毫秒级竞价：
+- **国民社交与电商支付**：微信 (`qq.com`, `weixin.qq.com`)、淘宝、天猫、支付宝 (`alipay.com`)、京东、拼多多、美团、饿了么、滴滴出行等。
+- **音视频与内容流媒体**：哔哩哔哩 (`bilibili.com`)、抖音 (`douyin.com`)、快手、爱奇艺、优酷、网易云音乐、QQ 音乐、知乎、小红书、微博等。
+- **大厂云与开发者基础设施**：阿里云、腾讯云、百度智能云、华为云、火山引擎、七牛云、开源中国 (`gitee.com`)、各类国内镜像源。
+- **金融政企与教育机构**：国有各大银行网银、高校教育网 (`.edu.cn`)、政务公共服务网 (`.gov.cn`)。
+> **💡 解决痛点**：通过注入客户端可信 ECS 网段，权威 DNS 能精确分配用户所在省份/城市的本地 CDN 节点，彻底杜绝传统海外 DoH 导致的“视频严重缓冲、测速带宽腰斩、外卖地图定位漂移”等体验灾难。
+
+### 3. 第三梯队：全球海外站点与前沿 AI 服务（抗污染 + 原生 Anycast IP）
+所有不在境内直连列表中的全球域名，自动进入全球组（Google DNS vs Cloudflare DNS 并发竞速）：
+- **前沿 AI 服务**：OpenAI (`chatgpt.com`, `api.openai.com`)、Claude (`claude.ai`)、Hugging Face、Midjourney、Copilot 等。
+- **全球开发者生态**：Docker Hub、NPM、PyPI、Rust crates.io、StackOverflow、Vercel、Supabase 等。
+- **海外主流流媒体与社交**：Google、YouTube、Twitter/X、Telegram、Netflix、Spotify、Wikipedia、Reddit、Discord 等。
+> **💡 解决痛点**：由 Google 与 Cloudflare 权威解析，杜绝 DNS 劫持与投毒阻断，返回纯净原生 Anycast IP。
+
+### 4. 第四梯队：自定义私有站点与穿透域名即时扩展
+支持通过专属 Webhook 或 GitHub Actions 向 `/api/rules/sync` 推送自定义域名列表（例如您的个人博客、NAS 穿透域名、DDNS 动态域名）。写入 KV 并在内存中秒级热生效，无需重新打包或重新部署 Worker。
 
 ---
 
@@ -174,6 +219,39 @@ curl -s "https://doh.yourdomain.com/json?name=linux.do&type=A"
 # 3. 使用 kdig 测试 RFC 8484 协议
 kdig -d @doh.yourdomain.com +https=/doh linux.do A
 ```
+
+---
+
+## 💡 生产环境最佳实践 (Best Practices)
+
+在实际生产部署与日常使用中，推荐采纳以下最佳实践以获得最佳的性能、安全性和稳定性：
+
+### 1. 域名与网络接入实践：必备自定义二级域名
+- ❌ **避免使用默认分配的 `*.workers.dev` 域名**：Cloudflare 默认提供的 `workers.dev` 二级域名在大面积运营商网络环境下受到 SNI 拦截与污染，直接作为 DoH 解析端点会导致大量握手超时或连接失败。
+- ✅ **推荐方案**：进入 Worker 的 **Settings -> Triggers -> Custom Domains** 绑定自己的二级域名（例如 `doh.yourdomain.com`）。Cloudflare 会自动在全球 Anycast 边缘分配就近节点并签发免费权威证书。
+
+### 2. 代理客户端协同最佳实践 (Clash / Mihomo / Surge)
+- **避免 DNS 解析死循环（DNS Loop 防范）**：
+  如果您的客户端规则将 `doh.yourdomain.com` 代理流量分流，而代理节点自身连接又依赖本 DoH 解析，会形成死循环。
+  **解决方案**：在客户端的 `hosts` 节点中将 `doh.yourdomain.com` 静态绑定，或在 `nameserver-policy` 中指定使用基础直连 DNS 解析该 DoH 域名本身。
+- **Mihomo / Clash Verge 最佳参数推荐**：
+  强烈建议搭配 `enhanced-mode: fake-ip` 使用。让本地代理客户端根据域名规则匹配直连或代理，同时将 `cf-doh` 作为主 `nameserver`，配合国内公共 DNS（如 `223.5.5.5`）作为 `default-nameserver`。这样国内流量与局域网解析即时命中，海外流量由 `cf-doh` 提供无污染支持。
+
+### 3. ECS 隐私与地域调度最佳平衡：保持 /24 与 /56 掩码
+- 项目默认设置 `ECS_IPV4_PREFIX = 24` 与 `ECS_IPV6_PREFIX = 56`。
+- **为什么这是黄金准则？**
+  - 如果传 `/32`（完整 IPv4），会暴露个人设备的真实公网 IP，存在严重隐私泄露风险；
+  - 如果不传 ECS（掩码为 0），国内 CDN 权威只会看到 Cloudflare 边缘节点的海外 Anycast IP，进而把本地资源调度到香港或美西 CDN，导致视频卡顿；
+  - `/24` 会自动把 IP 的最后一段置 0（如 `1.2.3.4` → `1.2.3.0/24`），既精确告知了上游您所在的运营商与省市级网段，又完美隐藏了终端个人身份。
+
+### 4. 规则自动化免运维实践：启用 GitHub Actions 每日同步
+- 单独维护一份庞大的域名列表十分费时。建议在仓库中配置 GitHub Secrets（`DOH_ENDPOINT` 与 `RULES_SYNC_SECRET`）。
+- 项目自带的 `.github/workflows/sync-rules.yml` 会在每天 UTC 04:00 自动抓取社区最新直连库，自动与 `sample-rules/direct-personal.txt` 合并后通过 Webhook 推送至您的 Worker KV，**实现永久全自动更新，一次配置即可彻底撒手**。
+
+### 5. 广告拦截与黑名单联动实践（可选）
+- 如果希望兼顾广告拦截，无须在手机上额外安装重量级去广告软件。
+- 只需在 Worker 环境变量中配置 `BLOCK_URL`（例如指向反广告规则源），并将 `BLOCK_ACTION` 设为 `zero`。
+- 命中黑名单的域名将在 Cloudflare 边缘瞬间返回 `0.0.0.0` 黑洞地址，响应时间通常 `< 1ms`，且不产生任何海外上游网络开销。
 
 ---
 
