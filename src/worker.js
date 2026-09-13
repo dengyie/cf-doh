@@ -25,7 +25,7 @@ import {
 } from "./dns.js";
 import { encodeEcsRdata, wrapEcsOption } from "./ecs.js";
 import { subnetForEcs } from "./ip.js";
-import { ensureRules, isDomestic, refreshRules, resetRules } from "./rules.js";
+import { ensureRules, isDomestic, refreshRules, resetRules, adoptRawRules } from "./rules.js";
 import { ensureBlock, isBlocked, refreshBlock, resetBlock as resetBlockFn } from "./filter.js";
 import { jsonResponse, toJsonResponse } from "./jsonapi.js";
 import { raceGroup, serverFailure } from "./resolver.js";
@@ -184,7 +184,7 @@ export async function handleRequest(request, env) {
       headers: {
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Accept, X-DoH-Token",
+        "Access-Control-Allow-Headers": "Content-Type, Accept, X-DoH-Token, Authorization, X-Rules-Secret",
         "Access-Control-Max-Age": "86400",
       },
     });
@@ -192,6 +192,12 @@ export async function handleRequest(request, env) {
 
   if (url.pathname === "/healthz" || url.pathname === "/metrics") {
     return metrics.healthResponse(config);
+  }
+  if (url.pathname === "/api/stats" || url.pathname === "/stats") {
+    return metrics.statsResponse(config);
+  }
+  if (url.pathname === "/api/rules/sync" || url.pathname === "/rules/sync") {
+    return handleRulesSync(request, url, env, config);
   }
   if (url.pathname === "/" && request.method === "GET") {
     const accept = (request.headers.get("accept") || "").toLowerCase();
@@ -302,7 +308,7 @@ async function resolveAndRelay(wireQuery, parsed, request, env, config) {
     config.ecsV6Prefix
   );
   const ecsKey = subnet ? `${subnet.family}:${subnet.network.join(".")}` : "none";
-  const result = await resolveWithCache(parsed, wireQuery, subnet, ecsKey, domestic, config);
+  const result = await resolveWithCache(parsed, wireQuery, subnet, ecsKey, domestic, config, env);
   if (!result) return { ok: false };
 
   // DNSSEC AD masking: pass upstream AD to DNSSEC-capable clients only.
@@ -356,9 +362,102 @@ async function handleJsonQuery(request, url, env, config) {
   return resp;
 }
 
+async function handleRulesSync(request, url, env, config) {
+  if (request.method !== "POST") {
+    return new Response(JSON.stringify({ error: "Method Not Allowed" }), {
+      status: 405,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  const secret = env.RULES_SYNC_SECRET || config.token;
+  if (!secret) {
+    return new Response(
+      JSON.stringify({ error: "RULES_SYNC_SECRET is not configured on server" }),
+      {
+        status: 403,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+  }
+  const authHeader = request.headers.get("Authorization") || "";
+  const bearerMatch = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : null;
+  const xSecret = request.headers.get("X-Rules-Secret");
+  const querySecret = url.searchParams.get("secret");
+  const tokenMatch = bearerMatch || xSecret || querySecret;
+  if (tokenMatch !== secret) {
+    return new Response(JSON.stringify({ error: "Unauthorized" }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  const ct = (request.headers.get("content-type") || "").toLowerCase();
+  const text = await request.text();
+  let ruleText = text;
+  if (ct.includes("application/json") && text.trim().length > 0) {
+    try {
+      const json = JSON.parse(text);
+      if (typeof json.rules === "string") {
+        ruleText = json.rules;
+      }
+    } catch {
+      return new Response(JSON.stringify({ error: "Invalid JSON payload" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+  }
+
+  if (ruleText && ruleText.trim().length > 0) {
+    try {
+      const adopted = await adoptRawRules(ruleText, env);
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          mode: "push",
+          rulesCount: adopted.ruleCount,
+          bytes: adopted.bytes,
+          updatedAt: new Date().toISOString(),
+        }),
+        {
+          headers: {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+          },
+        }
+      );
+    } catch (err) {
+      return new Response(
+        JSON.stringify({ error: err.message || "Failed to adopt rules" }),
+        {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    }
+  } else {
+    // Pull mode: trigger remote fetch and KV update
+    const updated = await refreshRules(env);
+    return new Response(
+      JSON.stringify({
+        ok: updated,
+        mode: "pull",
+        updatedAt: new Date().toISOString(),
+      }),
+      {
+        status: updated ? 200 : 502,
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+        },
+      }
+    );
+  }
+}
+
 const dnsCache = createCache();
 
-async function resolveWithCache(parsed, query, subnet, ecsKey, domestic, config) {
+async function resolveWithCache(parsed, query, subnet, ecsKey, domestic, config, env) {
   const qname = parsed.question.name;
   const qtype = parsed.question.qtype;
 
@@ -367,7 +466,15 @@ async function resolveWithCache(parsed, query, subnet, ecsKey, domestic, config)
     const cached = dnsCache.get(qname, qtype, ecsKey);
     if (cached) {
       metrics.inc("cache_hit");
-      return { answer: cached };
+      metrics.recordAnalyticsPoint(env, {
+        group: domestic ? "domestic" : "global",
+        winnerUrl: "cache",
+        durationMs: 0,
+        qtype,
+        rcode: "NOERROR",
+        cacheStatus: "hit",
+      });
+      return { answer: cached, from: "cache", durationMs: 0, cached: true };
     }
     metrics.inc("cache_miss");
   }
@@ -386,6 +493,17 @@ async function resolveWithCache(parsed, query, subnet, ecsKey, domestic, config)
   });
 
   if (!result) return null;
+
+  metrics.recordUpstreamRace(domestic ? "domestic" : "global", result.from, result.durationMs);
+  metrics.recordAnalyticsPoint(env, {
+    group: domestic ? "domestic" : "global",
+    winnerUrl: result.from,
+    durationMs: result.durationMs,
+    qtype,
+    rcode: "NOERROR",
+    cacheStatus: "miss",
+  });
+
   if (config.cacheTtlSeconds > 0) {
     // Cache for min(answer TTL, config TTL).
     let ttl = answerTtlSeconds(result.answer, parsed);

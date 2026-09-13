@@ -585,6 +585,29 @@ async function refreshRules(env, fetcher = fetch) {
     return false;
   }
 }
+async function adoptRawRules(text, env) {
+  if (typeof text !== "string" || text.trim().length === 0) {
+    throw new Error("rules_empty");
+  }
+  if (text.toLowerCase().includes("<html")) {
+    throw new Error("rules_html_response");
+  }
+  const bytes = ENC.encode(text);
+  if (bytes.byteLength > KV_MAX_BYTES) {
+    throw new Error("rules_too_large");
+  }
+  const parsed = parseRuleText(text);
+  const rule = { ...parsed, data: text };
+  live = rule;
+  failUntil = 0;
+  if (env && env.RULES_KV) {
+    await env.RULES_KV.put(KV_KEY, bytes);
+  }
+  return {
+    ruleCount: parsed.plain.length + parsed.full.size + parsed.regexp.length,
+    bytes: bytes.byteLength
+  };
+}
 function resetRules() {
   live = null;
   coldInflight = null;
@@ -875,6 +898,7 @@ function jsonResponse(obj, minTtlSeconds = 0) {
 async function queryUpstream(url, query, { timeoutMs, maxResponseBytes }) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const start = performance.now();
   try {
     const resp = await fetch(url, {
       method: "POST",
@@ -886,16 +910,18 @@ async function queryUpstream(url, query, { timeoutMs, maxResponseBytes }) {
       },
       body: query
     });
-    if (!resp.ok) return { ok: false, reason: `http_${resp.status}` };
+    const durationMs = Math.round((performance.now() - start) * 10) / 10;
+    if (!resp.ok) return { ok: false, reason: `http_${resp.status}`, durationMs };
     const ct = (resp.headers.get("content-type") || "").split(";", 1)[0].trim().toLowerCase();
-    if (ct !== DNS_CONTENT_TYPE) return { ok: false, reason: "bad_content_type" };
+    if (ct !== DNS_CONTENT_TYPE) return { ok: false, reason: "bad_content_type", durationMs };
     const buf = await resp.arrayBuffer();
     if (buf.byteLength < 12 || buf.byteLength > maxResponseBytes) {
-      return { ok: false, reason: "bad_size" };
+      return { ok: false, reason: "bad_size", durationMs };
     }
-    return { ok: true, body: new Uint8Array(buf) };
+    return { ok: true, body: new Uint8Array(buf), durationMs };
   } catch {
-    return { ok: false, reason: controller.signal.aborted ? "timeout" : "network" };
+    const durationMs = Math.round((performance.now() - start) * 10) / 10;
+    return { ok: false, reason: controller.signal.aborted ? "timeout" : "network", durationMs };
   } finally {
     clearTimeout(timer);
   }
@@ -913,7 +939,7 @@ function classify(r) {
 }
 async function raceGroup(urls, query, parsedInfo, { timeoutMs, maxResponseBytes, on }) {
   const settle = (r) => {
-    if (on) on({ kind: classify(r), url: r.url });
+    if (on) on({ kind: classify(r), url: r.url, durationMs: r.durationMs ?? 0 });
   };
   const pending = urls.map(async (url) => {
     const res = await queryUpstream(url, query, { timeoutMs, maxResponseBytes });
@@ -932,7 +958,7 @@ async function raceGroup(urls, query, parsedInfo, { timeoutMs, maxResponseBytes,
             try {
               const flags = validateUpstreamResponse(r.body, parsedInfo ?? null);
               if ((flags & 15) !== 2) {
-                resolve({ answer: r.body, from: r.url });
+                resolve({ answer: r.body, from: r.url, durationMs: r.durationMs ?? 0 });
                 return;
               }
             } catch {
@@ -942,7 +968,7 @@ async function raceGroup(urls, query, parsedInfo, { timeoutMs, maxResponseBytes,
         },
         (err) => {
           settled += 1;
-          settle({ ok: false, reason: "error", url: urls[i] });
+          settle({ ok: false, reason: "error", url: urls[i], durationMs: 0 });
           if (settled === pending.length) resolve(null);
         }
       );
@@ -970,23 +996,153 @@ var COUNTERS = {
   cache_miss: 0,
   rules_fetch: 0,
   rules_unchanged: 0,
-  rules_fetch_fail: 0
+  rules_fetch_fail: 0,
+  filter_blocked: 0
 };
 var startedAt = Date.now();
+var UPSTREAM_WINS = {};
+var MAX_SAMPLES = 300;
+var LATENCY_SAMPLES = {
+  domestic: [],
+  global: []
+};
 function inc(name, n = 1) {
   COUNTERS[name] = (COUNTERS[name] || 0) + n;
 }
 function snapshot() {
   return { ...COUNTERS };
 }
+function recordUpstreamRace(group, winnerUrl, durationMs) {
+  let host = "unknown";
+  if (winnerUrl) {
+    try {
+      host = new URL(winnerUrl).hostname;
+    } catch {
+      host = String(winnerUrl);
+    }
+  }
+  UPSTREAM_WINS[host] = (UPSTREAM_WINS[host] || 0) + 1;
+  const key = group === "domestic" ? "domestic" : "global";
+  if (typeof durationMs === "number" && durationMs >= 0) {
+    const arr = LATENCY_SAMPLES[key];
+    if (arr.length >= MAX_SAMPLES) arr.shift();
+    arr.push(Math.round(durationMs * 10) / 10);
+  }
+}
+function recordAnalyticsPoint(env, { group, winnerUrl, durationMs, qtype, rcode, cacheStatus }) {
+  if (env && env.DOH_ANALYTICS && typeof env.DOH_ANALYTICS.writeDataPoint === "function") {
+    let host = "cache";
+    if (winnerUrl && winnerUrl !== "cache") {
+      try {
+        host = new URL(winnerUrl).hostname;
+      } catch {
+        host = String(winnerUrl);
+      }
+    }
+    try {
+      env.DOH_ANALYTICS.writeDataPoint({
+        blobs: [
+          host,
+          group || "unknown",
+          qtype ? String(qtype) : "A",
+          rcode ? String(rcode) : "NOERROR",
+          cacheStatus || "miss"
+        ],
+        doubles: [typeof durationMs === "number" ? durationMs : 0],
+        indexes: [host]
+      });
+    } catch {
+    }
+  }
+}
+function computePercentiles(samples) {
+  if (!samples || samples.length === 0) {
+    return { count: 0, avgMs: 0, p50Ms: 0, p90Ms: 0, p95Ms: 0, minMs: 0, maxMs: 0 };
+  }
+  const sorted = [...samples].sort((a, b) => a - b);
+  const sum = samples.reduce((acc, v) => acc + v, 0);
+  return {
+    count: samples.length,
+    avgMs: Math.round(sum / samples.length * 10) / 10,
+    p50Ms: sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.5))],
+    p90Ms: sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.9))],
+    p95Ms: sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))],
+    minMs: sorted[0],
+    maxMs: sorted[sorted.length - 1]
+  };
+}
+function statsSnapshot(config = {}) {
+  const domesticUrls = config.domesticUrls || [
+    config.domesticUrl || "https://dns.alidns.com/dns-query",
+    config.domesticFallbackUrl || "https://doh.pub/dns-query"
+  ];
+  const globalUrls = config.globalUrls || [
+    config.globalUrl || "https://dns.google/dns-query",
+    config.globalFallbackUrl || "https://cloudflare-dns.com/dns-query"
+  ];
+  function buildGroupStats(urls) {
+    const list = urls.map((u) => {
+      let host = u;
+      try {
+        host = new URL(u).hostname;
+      } catch {
+      }
+      return { url: u, host, wins: UPSTREAM_WINS[host] || 0 };
+    });
+    const totalWins = list.reduce((acc, item) => acc + item.wins, 0);
+    const result = {};
+    for (const item of list) {
+      result[item.host] = {
+        wins: item.wins,
+        winRate: totalWins > 0 ? `${(item.wins / totalWins * 100).toFixed(1)}%` : "0.0%"
+      };
+    }
+    return { upstreams: result, totalWins };
+  }
+  const domesticStats = buildGroupStats(domesticUrls);
+  const globalStats = buildGroupStats(globalUrls);
+  const totalCacheRequests = COUNTERS.cache_hit + COUNTERS.cache_miss;
+  const cacheHitRate = totalCacheRequests > 0 ? `${(COUNTERS.cache_hit / totalCacheRequests * 100).toFixed(1)}%` : "0.0%";
+  return {
+    service: "cf-doh",
+    version: "1.1.0",
+    uptimeSec: Math.round((Date.now() - startedAt) / 1e3),
+    totalRequests: COUNTERS.requests,
+    cache: {
+      hits: COUNTERS.cache_hit,
+      misses: COUNTERS.cache_miss,
+      hitRate: cacheHitRate
+    },
+    latency: {
+      domestic: computePercentiles(LATENCY_SAMPLES.domestic),
+      global: computePercentiles(LATENCY_SAMPLES.global)
+    },
+    upstreams: {
+      domestic: domesticStats,
+      global: globalStats
+    },
+    rawWins: { ...UPSTREAM_WINS }
+  };
+}
+function statsResponse(config) {
+  const body = JSON.stringify(statsSnapshot(config), null, 2);
+  return new Response(body, {
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+      "Access-Control-Allow-Origin": "*"
+    }
+  });
+}
 function healthResponse(config) {
   const body = JSON.stringify(
     {
       status: "ok",
       service: "cf-doh",
-      version: "1.0.0",
+      version: "1.1.0",
       uptimeSec: Math.round((Date.now() - startedAt) / 1e3),
       counters: snapshot(),
+      stats: statsSnapshot(config),
       config: {
         path: config.path,
         upstreams: { domestic: config.domesticUrls, global: config.globalUrls },
@@ -1000,7 +1156,23 @@ function healthResponse(config) {
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store" }
   });
 }
-var metrics = { inc, snapshot, healthResponse };
+function resetMetrics() {
+  for (const k of Object.keys(COUNTERS)) COUNTERS[k] = 0;
+  for (const k of Object.keys(UPSTREAM_WINS)) delete UPSTREAM_WINS[k];
+  LATENCY_SAMPLES.domestic.length = 0;
+  LATENCY_SAMPLES.global.length = 0;
+  startedAt = Date.now();
+}
+var metrics = {
+  inc,
+  snapshot,
+  recordUpstreamRace,
+  recordAnalyticsPoint,
+  statsSnapshot,
+  statsResponse,
+  healthResponse,
+  resetMetrics
+};
 
 // src/cache.js
 var DEFAULT_SIZE = 1024;
@@ -1389,6 +1561,80 @@ function renderLandingHtml(origin, config) {
             <button class="copy-btn" onclick="copyText('${origin}/healthz')">\u590D\u5236</button>
           </div>
         </div>
+        <div style="margin-bottom: 16px;">
+          <div style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 4px;">\u7ADE\u901F\u7EDF\u8BA1 API (JSON)</div>
+          <div class="code-block" style="padding: 10px 14px;">
+            <code>${origin}/api/stats</code>
+            <button class="copy-btn" onclick="copyText('${origin}/api/stats')">\u590D\u5236</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- \u{1F4CA} \u4E0A\u6E38\u7ADE\u901F\u4E0E\u5EA6\u91CF\u76D1\u63A7\u5361\u7247 -->
+    <div class="card" style="margin-bottom: 32px;">
+      <div class="card-title" style="justify-content: space-between; flex-wrap: wrap;">
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <span>\u{1F4CA}</span>
+          <span>\u4E0A\u6E38\u5E76\u53D1\u7ADE\u901F\u4E0E\u5EF6\u8FDF\u76D1\u63A7 (Racing & P95 Metrics)</span>
+        </div>
+        <button class="btn" style="padding: 6px 12px; font-size: 0.82rem;" onclick="loadStats()">
+          <span>\u{1F504}</span><span>\u5237\u65B0\u6307\u6807</span>
+        </button>
+      </div>
+      <p style="font-size:0.88rem; color:var(--text-muted); margin-bottom:16px;">
+        \u6240\u6709\u4E0A\u6E38\u5E76\u53D1\u540C\u65F6\u53D1\u8D77\u8BF7\u6C42\uFF0C\u5EF6\u8FDF\u7531\u6700\u5FEB\u8282\u70B9\u51B3\u5B9A\u3002\u5B9E\u65F6\u7EDF\u8BA1\u5404\u4E0A\u6E38\u7684\u80DC\u51FA\u6BD4\u4F8B\u3001P50 / P95 \u89E3\u6790\u5EF6\u8FDF\u53CA\u8FB9\u7F18\u7F13\u5B58\u6548\u7387\u3002
+      </p>
+
+      <div class="grid grid-2" style="margin-bottom: 16px;">
+        <!-- \u56FD\u5185\u7EC4\u5BF9\u6BD4 -->
+        <div style="background:var(--code-bg); padding:16px; border-radius:10px; border:1px solid var(--card-border);">
+          <div style="display:flex; justify-content:space-between; margin-bottom:8px; font-weight:600; font-size:0.9rem;">
+            <span>\u{1F1E8}\u{1F1F3} \u56FD\u5185\u7EC4\u7ADE\u901F (AliDNS vs DNSPod)</span>
+            <span id="domesticTotalWins" style="color:var(--text-muted); font-size:0.8rem;">0 \u80DC\u51FA</span>
+          </div>
+          <div style="display:flex; height:10px; border-radius:9999px; overflow:hidden; background:rgba(255,255,255,0.1); margin-bottom:8px;">
+            <div id="barAlidns" style="width:50%; background:#3b82f6; transition:width 0.4s;"></div>
+            <div id="barDohpub" style="width:50%; background:#10b981; transition:width 0.4s;"></div>
+          </div>
+          <div style="display:flex; justify-content:space-between; font-size:0.8rem; color:var(--text-muted);">
+            <span><span style="color:#3b82f6;">\u25CF</span> \u963F\u91CC DNS: <b id="winAlidns">0 (0.0%)</b></span>
+            <span><span style="color:#10b981;">\u25CF</span> \u817E\u8BAF DNSPod: <b id="winDohpub">0 (0.0%)</b></span>
+          </div>
+          <div style="margin-top:12px; padding-top:8px; border-top:1px dashed var(--card-border); font-size:0.8rem; display:flex; justify-content:space-between;">
+            <span>P50: <b id="p50Domestic">- ms</b></span>
+            <span>P95: <b id="p95Domestic" style="color:#f59e0b;">- ms</b></span>
+            <span>Avg: <b id="avgDomestic">- ms</b></span>
+          </div>
+        </div>
+
+        <!-- \u5168\u7403\u7EC4\u5BF9\u6BD4 -->
+        <div style="background:var(--code-bg); padding:16px; border-radius:10px; border:1px solid var(--card-border);">
+          <div style="display:flex; justify-content:space-between; margin-bottom:8px; font-weight:600; font-size:0.9rem;">
+            <span>\u{1F310} \u5168\u7403\u7EC4\u7ADE\u901F (Google vs Cloudflare)</span>
+            <span id="globalTotalWins" style="color:var(--text-muted); font-size:0.8rem;">0 \u80DC\u51FA</span>
+          </div>
+          <div style="display:flex; height:10px; border-radius:9999px; overflow:hidden; background:rgba(255,255,255,0.1); margin-bottom:8px;">
+            <div id="barGoogle" style="width:50%; background:#8b5cf6; transition:width 0.4s;"></div>
+            <div id="barCf" style="width:50%; background:#f97316; transition:width 0.4s;"></div>
+          </div>
+          <div style="display:flex; justify-content:space-between; font-size:0.8rem; color:var(--text-muted);">
+            <span><span style="color:#8b5cf6;">\u25CF</span> Google DNS: <b id="winGoogle">0 (0.0%)</b></span>
+            <span><span style="color:#f97316;">\u25CF</span> Cloudflare: <b id="winCf">0 (0.0%)</b></span>
+          </div>
+          <div style="margin-top:12px; padding-top:8px; border-top:1px dashed var(--card-border); font-size:0.8rem; display:flex; justify-content:space-between;">
+            <span>P50: <b id="p50Global">- ms</b></span>
+            <span>P95: <b id="p95Global" style="color:#f59e0b;">- ms</b></span>
+            <span>Avg: <b id="avgGlobal">- ms</b></span>
+          </div>
+        </div>
+      </div>
+
+      <div style="display:flex; flex-wrap:wrap; gap:16px; font-size:0.82rem; color:var(--text-muted);">
+        <span>\u{1F4E6} \u8FB9\u7F18\u7F13\u5B58\u547D\u4E2D\u7387: <b id="cacheHitRate" style="color:var(--accent);">0.0%</b></span>
+        <span>\u{1F4C8} \u7D2F\u8BA1\u670D\u52A1\u8BF7\u6C42: <b id="totalRequests" style="color:var(--text);">0</b></span>
+        <span>\u23F1\uFE0F \u8282\u70B9\u8FD0\u884C\u65F6\u95F4: <b id="nodeUptime" style="color:var(--text);">0s</b></span>
+        <span>\u2601\uFE0F Analytics Engine: <b style="color:var(--primary);">\u5DF2\u63A5\u5165 (Worker \u70B9\u4F4D\u5199\u5165)</b></span>
       </div>
     </div>
 
@@ -1577,6 +1823,7 @@ kdig -d @${new URL(origin).hostname} +https=${config.path} linux.do A</code></pr
         }
 
         box.innerHTML = html;
+        loadStats();
       } catch (err) {
         box.innerHTML = '<span style="color:#ef4444">\u67E5\u8BE2\u5931\u8D25: ' + err.message + '</span>';
       } finally {
@@ -1584,6 +1831,66 @@ kdig -d @${new URL(origin).hostname} +https=${config.path} linux.do A</code></pr
         btn.innerText = '\u67E5\u8BE2';
       }
     }
+
+    async function loadStats() {
+      try {
+        const resp = await fetch('/api/stats');
+        if (!resp.ok) return;
+        const data = await resp.json();
+
+        // Domestic
+        const dom = (data.upstreams && data.upstreams.domestic) ? data.upstreams.domestic : { upstreams: {}, totalWins: 0 };
+        const ali = dom.upstreams['dns.alidns.com'] || { wins: 0, winRate: '0.0%' };
+        const pod = dom.upstreams['doh.pub'] || { wins: 0, winRate: '0.0%' };
+        document.getElementById('domesticTotalWins').innerText = dom.totalWins + ' \u6B21\u80DC\u51FA';
+        document.getElementById('winAlidns').innerText = ali.wins + ' (' + ali.winRate + ')';
+        document.getElementById('winDohpub').innerText = pod.wins + ' (' + pod.winRate + ')';
+        const domTotal = ali.wins + pod.wins;
+        const aliPct = domTotal > 0 ? (ali.wins / domTotal) * 100 : 50;
+        document.getElementById('barAlidns').style.width = aliPct + '%';
+        document.getElementById('barDohpub').style.width = (100 - aliPct) + '%';
+
+        if (data.latency && data.latency.domestic) {
+          document.getElementById('p50Domestic').innerText = (data.latency.domestic.p50Ms || 0) + ' ms';
+          document.getElementById('p95Domestic').innerText = (data.latency.domestic.p95Ms || 0) + ' ms';
+          document.getElementById('avgDomestic').innerText = (data.latency.domestic.avgMs || 0) + ' ms';
+        }
+
+        // Global
+        const glob = (data.upstreams && data.upstreams.global) ? data.upstreams.global : { upstreams: {}, totalWins: 0 };
+        const ggl = glob.upstreams['dns.google'] || { wins: 0, winRate: '0.0%' };
+        const cf = glob.upstreams['cloudflare-dns.com'] || { wins: 0, winRate: '0.0%' };
+        document.getElementById('globalTotalWins').innerText = glob.totalWins + ' \u6B21\u80DC\u51FA';
+        document.getElementById('winGoogle').innerText = ggl.wins + ' (' + ggl.winRate + ')';
+        document.getElementById('winCf').innerText = cf.wins + ' (' + cf.winRate + ')';
+        const globTotal = ggl.wins + cf.wins;
+        const gglPct = globTotal > 0 ? (ggl.wins / globTotal) * 100 : 50;
+        document.getElementById('barGoogle').style.width = gglPct + '%';
+        document.getElementById('barCf').style.width = (100 - gglPct) + '%';
+
+        if (data.latency && data.latency.global) {
+          document.getElementById('p50Global').innerText = (data.latency.global.p50Ms || 0) + ' ms';
+          document.getElementById('p95Global').innerText = (data.latency.global.p95Ms || 0) + ' ms';
+          document.getElementById('avgGlobal').innerText = (data.latency.global.avgMs || 0) + ' ms';
+        }
+
+        if (data.cache) {
+          document.getElementById('cacheHitRate').innerText = data.cache.hitRate || '0.0%';
+        }
+        if (typeof data.totalRequests !== 'undefined') {
+          document.getElementById('totalRequests').innerText = data.totalRequests;
+        }
+        if (typeof data.uptimeSec !== 'undefined') {
+          document.getElementById('nodeUptime').innerText = data.uptimeSec + 's';
+        }
+      } catch (err) {
+        console.warn('Failed to load stats:', err);
+      }
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      loadStats();
+    });
 
     function switchTab(name) {
       const contents = document.querySelectorAll('.tab-content');
@@ -1738,13 +2045,19 @@ async function handleRequest(request, env) {
       headers: {
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Accept, X-DoH-Token",
+        "Access-Control-Allow-Headers": "Content-Type, Accept, X-DoH-Token, Authorization, X-Rules-Secret",
         "Access-Control-Max-Age": "86400"
       }
     });
   }
   if (url.pathname === "/healthz" || url.pathname === "/metrics") {
     return metrics.healthResponse(config);
+  }
+  if (url.pathname === "/api/stats" || url.pathname === "/stats") {
+    return metrics.statsResponse(config);
+  }
+  if (url.pathname === "/api/rules/sync" || url.pathname === "/rules/sync") {
+    return handleRulesSync(request, url, env, config);
   }
   if (url.pathname === "/" && request.method === "GET") {
     const accept = (request.headers.get("accept") || "").toLowerCase();
@@ -1828,7 +2141,7 @@ async function resolveAndRelay(wireQuery, parsed, request, env, config) {
     config.ecsV6Prefix
   );
   const ecsKey = subnet ? `${subnet.family}:${subnet.network.join(".")}` : "none";
-  const result = await resolveWithCache(parsed, wireQuery, subnet, ecsKey, domestic, config);
+  const result = await resolveWithCache(parsed, wireQuery, subnet, ecsKey, domestic, config, env);
   if (!result) return { ok: false };
   let answer = result.answer;
   if (config.dnssec) {
@@ -1871,15 +2184,112 @@ async function handleJsonQuery(request, url, env, config) {
   }
   return resp;
 }
+async function handleRulesSync(request, url, env, config) {
+  if (request.method !== "POST") {
+    return new Response(JSON.stringify({ error: "Method Not Allowed" }), {
+      status: 405,
+      headers: { "Content-Type": "application/json" }
+    });
+  }
+  const secret = env.RULES_SYNC_SECRET || config.token;
+  if (!secret) {
+    return new Response(
+      JSON.stringify({ error: "RULES_SYNC_SECRET is not configured on server" }),
+      {
+        status: 403,
+        headers: { "Content-Type": "application/json" }
+      }
+    );
+  }
+  const authHeader = request.headers.get("Authorization") || "";
+  const bearerMatch = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : null;
+  const xSecret = request.headers.get("X-Rules-Secret");
+  const querySecret = url.searchParams.get("secret");
+  const tokenMatch = bearerMatch || xSecret || querySecret;
+  if (tokenMatch !== secret) {
+    return new Response(JSON.stringify({ error: "Unauthorized" }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" }
+    });
+  }
+  const ct = (request.headers.get("content-type") || "").toLowerCase();
+  const text = await request.text();
+  let ruleText = text;
+  if (ct.includes("application/json") && text.trim().length > 0) {
+    try {
+      const json = JSON.parse(text);
+      if (typeof json.rules === "string") {
+        ruleText = json.rules;
+      }
+    } catch {
+      return new Response(JSON.stringify({ error: "Invalid JSON payload" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+  }
+  if (ruleText && ruleText.trim().length > 0) {
+    try {
+      const adopted = await adoptRawRules(ruleText, env);
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          mode: "push",
+          rulesCount: adopted.ruleCount,
+          bytes: adopted.bytes,
+          updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+        }),
+        {
+          headers: {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*"
+          }
+        }
+      );
+    } catch (err) {
+      return new Response(
+        JSON.stringify({ error: err.message || "Failed to adopt rules" }),
+        {
+          status: 400,
+          headers: { "Content-Type": "application/json" }
+        }
+      );
+    }
+  } else {
+    const updated = await refreshRules(env);
+    return new Response(
+      JSON.stringify({
+        ok: updated,
+        mode: "pull",
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      }),
+      {
+        status: updated ? 200 : 502,
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*"
+        }
+      }
+    );
+  }
+}
 var dnsCache = createCache();
-async function resolveWithCache(parsed, query, subnet, ecsKey, domestic, config) {
+async function resolveWithCache(parsed, query, subnet, ecsKey, domestic, config, env) {
   const qname = parsed.question.name;
   const qtype = parsed.question.qtype;
   if (config.cacheTtlSeconds > 0) {
     const cached = dnsCache.get(qname, qtype, ecsKey);
     if (cached) {
       metrics.inc("cache_hit");
-      return { answer: cached };
+      metrics.recordAnalyticsPoint(env, {
+        group: domestic ? "domestic" : "global",
+        winnerUrl: "cache",
+        durationMs: 0,
+        qtype,
+        rcode: "NOERROR",
+        cacheStatus: "hit"
+      });
+      return { answer: cached, from: "cache", durationMs: 0, cached: true };
     }
     metrics.inc("cache_miss");
   }
@@ -1896,6 +2306,15 @@ async function resolveWithCache(parsed, query, subnet, ecsKey, domestic, config)
     }
   });
   if (!result) return null;
+  metrics.recordUpstreamRace(domestic ? "domestic" : "global", result.from, result.durationMs);
+  metrics.recordAnalyticsPoint(env, {
+    group: domestic ? "domestic" : "global",
+    winnerUrl: result.from,
+    durationMs: result.durationMs,
+    qtype,
+    rcode: "NOERROR",
+    cacheStatus: "miss"
+  });
   if (config.cacheTtlSeconds > 0) {
     let ttl = answerTtlSeconds(result.answer, parsed);
     if (ttl <= 0) ttl = config.cacheTtlSeconds;

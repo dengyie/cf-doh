@@ -25,6 +25,7 @@ import {
 async function queryUpstream(url, query, { timeoutMs, maxResponseBytes }) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const start = performance.now();
   try {
     const resp = await fetch(url, {
       method: "POST",
@@ -36,16 +37,18 @@ async function queryUpstream(url, query, { timeoutMs, maxResponseBytes }) {
       },
       body: query,
     });
-    if (!resp.ok) return { ok: false, reason: `http_${resp.status}` };
+    const durationMs = Math.round((performance.now() - start) * 10) / 10;
+    if (!resp.ok) return { ok: false, reason: `http_${resp.status}`, durationMs };
     const ct = (resp.headers.get("content-type") || "").split(";", 1)[0].trim().toLowerCase();
-    if (ct !== DNS_CONTENT_TYPE) return { ok: false, reason: "bad_content_type" };
+    if (ct !== DNS_CONTENT_TYPE) return { ok: false, reason: "bad_content_type", durationMs };
     const buf = await resp.arrayBuffer();
     if (buf.byteLength < 12 || buf.byteLength > maxResponseBytes) {
-      return { ok: false, reason: "bad_size" };
+      return { ok: false, reason: "bad_size", durationMs };
     }
-    return { ok: true, body: new Uint8Array(buf) };
+    return { ok: true, body: new Uint8Array(buf), durationMs };
   } catch {
-    return { ok: false, reason: controller.signal.aborted ? "timeout" : "network" };
+    const durationMs = Math.round((performance.now() - start) * 10) / 10;
+    return { ok: false, reason: controller.signal.aborted ? "timeout" : "network", durationMs };
   } finally {
     clearTimeout(timer);
   }
@@ -72,7 +75,7 @@ function classify(r) {
  */
 export async function raceGroup(urls, query, parsedInfo, { timeoutMs, maxResponseBytes, on }) {
   const settle = (r) => {
-    if (on) on({ kind: classify(r), url: r.url });
+    if (on) on({ kind: classify(r), url: r.url, durationMs: r.durationMs ?? 0 });
   };
   const pending = urls.map(async (url) => {
     const res = await queryUpstream(url, query, { timeoutMs, maxResponseBytes });
@@ -93,7 +96,7 @@ export async function raceGroup(urls, query, parsedInfo, { timeoutMs, maxRespons
             try {
               const flags = validateUpstreamResponse(r.body, parsedInfo ?? null);
               if ((flags & 0x000f) !== 2) {
-                resolve({ answer: r.body, from: r.url });
+                resolve({ answer: r.body, from: r.url, durationMs: r.durationMs ?? 0 });
                 return;
               }
             } catch {
@@ -104,7 +107,7 @@ export async function raceGroup(urls, query, parsedInfo, { timeoutMs, maxRespons
         },
         (err) => {
           settled += 1;
-          settle({ ok: false, reason: "error", url: urls[i] });
+          settle({ ok: false, reason: "error", url: urls[i], durationMs: 0 });
           if (settled === pending.length) resolve(null);
         }
       );

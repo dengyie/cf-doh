@@ -1,0 +1,89 @@
+name: Sync Rules to KV
+
+on:
+  schedule:
+    # Run daily at 04:00 UTC (12:00 CST)
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    inputs:
+      rules_url:
+        description: "Custom rules URL (leave empty for default Loyalsoldier direct-list)"
+        required: false
+        default: ""
+      mode:
+        description: "Sync mode (webhook or kv)"
+        required: false
+        default: "webhook"
+        type: choice
+        options:
+          - webhook
+          - kv
+          - all
+  push:
+    branches: [ "main" ]
+    paths:
+      - "sample-rules/**"
+
+jobs:
+  sync:
+    name: Fetch & Sync Direct Rules to Cloudflare KV
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: "npm"
+
+      - name: Download and prepare rules
+        run: |
+          set -euo pipefail
+          DEFAULT_URL="https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/direct-list.txt"
+          TARGET_URL="${{ github.event.inputs.rules_url }}"
+          if [ -z "$TARGET_URL" ]; then
+            TARGET_URL="$DEFAULT_URL"
+          fi
+
+          echo "Downloading upstream rules from $TARGET_URL..."
+          curl -f -sSL --retry 3 --retry-delay 2 "$TARGET_URL" -o upstream-rules.txt
+
+          echo "Merging local personal override rules (sample-rules/direct-personal.txt)..."
+          cat sample-rules/direct-personal.txt upstream-rules.txt | grep -v '^[[:space:]]*$' | grep -v '^#' | sort -u > merged-rules.txt
+
+          LINE_COUNT=$(wc -l < merged-rules.txt)
+          BYTE_COUNT=$(wc -c < merged-rules.txt)
+          echo "Merged rule count: $LINE_COUNT lines ($BYTE_COUNT bytes)"
+
+          # Sanity check: must contain linux.do and github.com
+          grep -q "linux.do" merged-rules.txt || { echo "Error: linux.do missing!"; exit 1; }
+          grep -q "github.com" merged-rules.txt || { echo "Error: github.com missing!"; exit 1; }
+
+      - name: Sync via Worker Webhook (/api/rules/sync)
+        if: ${{ (github.event.inputs.mode == '' || github.event.inputs.mode == 'webhook' || github.event.inputs.mode == 'all') && env.DOH_ENDPOINT != '' && env.RULES_SYNC_SECRET != '' }}
+        env:
+          DOH_ENDPOINT: ${{ secrets.DOH_ENDPOINT }}
+          RULES_SYNC_SECRET: ${{ secrets.RULES_SYNC_SECRET }}
+        run: |
+          set -euo pipefail
+          ENDPOINT="${DOH_ENDPOINT%/}"
+          echo "Triggering Webhook sync to $ENDPOINT/api/rules/sync..."
+          RESPONSE=$(curl -f -sS -X POST "$ENDPOINT/api/rules/sync" \
+            -H "Authorization: Bearer $RULES_SYNC_SECRET" \
+            -H "Content-Type: text/plain" \
+            --data-binary @merged-rules.txt)
+          echo "Webhook response: $RESPONSE"
+
+      - name: Sync via Cloudflare Wrangler (Direct KV Put fallback)
+        if: ${{ (github.event.inputs.mode == 'kv' || github.event.inputs.mode == 'all') && env.CLOUDFLARE_API_TOKEN != '' }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          echo "Writing merged-rules.txt directly into Cloudflare RULES_KV..."
+          npm ci
+          npx wrangler kv key put --binding=RULES_KV "rules:data" --path=merged-rules.txt
+          echo "Direct KV write completed."

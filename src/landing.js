@@ -360,6 +360,80 @@ export function renderLandingHtml(origin, config) {
             <button class="copy-btn" onclick="copyText('${origin}/healthz')">复制</button>
           </div>
         </div>
+        <div style="margin-bottom: 16px;">
+          <div style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 4px;">竞速统计 API (JSON)</div>
+          <div class="code-block" style="padding: 10px 14px;">
+            <code>${origin}/api/stats</code>
+            <button class="copy-btn" onclick="copyText('${origin}/api/stats')">复制</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 📊 上游竞速与度量监控卡片 -->
+    <div class="card" style="margin-bottom: 32px;">
+      <div class="card-title" style="justify-content: space-between; flex-wrap: wrap;">
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <span>📊</span>
+          <span>上游并发竞速与延迟监控 (Racing & P95 Metrics)</span>
+        </div>
+        <button class="btn" style="padding: 6px 12px; font-size: 0.82rem;" onclick="loadStats()">
+          <span>🔄</span><span>刷新指标</span>
+        </button>
+      </div>
+      <p style="font-size:0.88rem; color:var(--text-muted); margin-bottom:16px;">
+        所有上游并发同时发起请求，延迟由最快节点决定。实时统计各上游的胜出比例、P50 / P95 解析延迟及边缘缓存效率。
+      </p>
+
+      <div class="grid grid-2" style="margin-bottom: 16px;">
+        <!-- 国内组对比 -->
+        <div style="background:var(--code-bg); padding:16px; border-radius:10px; border:1px solid var(--card-border);">
+          <div style="display:flex; justify-content:space-between; margin-bottom:8px; font-weight:600; font-size:0.9rem;">
+            <span>🇨🇳 国内组竞速 (AliDNS vs DNSPod)</span>
+            <span id="domesticTotalWins" style="color:var(--text-muted); font-size:0.8rem;">0 胜出</span>
+          </div>
+          <div style="display:flex; height:10px; border-radius:9999px; overflow:hidden; background:rgba(255,255,255,0.1); margin-bottom:8px;">
+            <div id="barAlidns" style="width:50%; background:#3b82f6; transition:width 0.4s;"></div>
+            <div id="barDohpub" style="width:50%; background:#10b981; transition:width 0.4s;"></div>
+          </div>
+          <div style="display:flex; justify-content:space-between; font-size:0.8rem; color:var(--text-muted);">
+            <span><span style="color:#3b82f6;">●</span> 阿里 DNS: <b id="winAlidns">0 (0.0%)</b></span>
+            <span><span style="color:#10b981;">●</span> 腾讯 DNSPod: <b id="winDohpub">0 (0.0%)</b></span>
+          </div>
+          <div style="margin-top:12px; padding-top:8px; border-top:1px dashed var(--card-border); font-size:0.8rem; display:flex; justify-content:space-between;">
+            <span>P50: <b id="p50Domestic">- ms</b></span>
+            <span>P95: <b id="p95Domestic" style="color:#f59e0b;">- ms</b></span>
+            <span>Avg: <b id="avgDomestic">- ms</b></span>
+          </div>
+        </div>
+
+        <!-- 全球组对比 -->
+        <div style="background:var(--code-bg); padding:16px; border-radius:10px; border:1px solid var(--card-border);">
+          <div style="display:flex; justify-content:space-between; margin-bottom:8px; font-weight:600; font-size:0.9rem;">
+            <span>🌐 全球组竞速 (Google vs Cloudflare)</span>
+            <span id="globalTotalWins" style="color:var(--text-muted); font-size:0.8rem;">0 胜出</span>
+          </div>
+          <div style="display:flex; height:10px; border-radius:9999px; overflow:hidden; background:rgba(255,255,255,0.1); margin-bottom:8px;">
+            <div id="barGoogle" style="width:50%; background:#8b5cf6; transition:width 0.4s;"></div>
+            <div id="barCf" style="width:50%; background:#f97316; transition:width 0.4s;"></div>
+          </div>
+          <div style="display:flex; justify-content:space-between; font-size:0.8rem; color:var(--text-muted);">
+            <span><span style="color:#8b5cf6;">●</span> Google DNS: <b id="winGoogle">0 (0.0%)</b></span>
+            <span><span style="color:#f97316;">●</span> Cloudflare: <b id="winCf">0 (0.0%)</b></span>
+          </div>
+          <div style="margin-top:12px; padding-top:8px; border-top:1px dashed var(--card-border); font-size:0.8rem; display:flex; justify-content:space-between;">
+            <span>P50: <b id="p50Global">- ms</b></span>
+            <span>P95: <b id="p95Global" style="color:#f59e0b;">- ms</b></span>
+            <span>Avg: <b id="avgGlobal">- ms</b></span>
+          </div>
+        </div>
+      </div>
+
+      <div style="display:flex; flex-wrap:wrap; gap:16px; font-size:0.82rem; color:var(--text-muted);">
+        <span>📦 边缘缓存命中率: <b id="cacheHitRate" style="color:var(--accent);">0.0%</b></span>
+        <span>📈 累计服务请求: <b id="totalRequests" style="color:var(--text);">0</b></span>
+        <span>⏱️ 节点运行时间: <b id="nodeUptime" style="color:var(--text);">0s</b></span>
+        <span>☁️ Analytics Engine: <b style="color:var(--primary);">已接入 (Worker 点位写入)</b></span>
       </div>
     </div>
 
@@ -548,6 +622,7 @@ kdig -d @${new URL(origin).hostname} +https=${config.path} linux.do A</code></pr
         }
 
         box.innerHTML = html;
+        loadStats();
       } catch (err) {
         box.innerHTML = '<span style="color:#ef4444">查询失败: ' + err.message + '</span>';
       } finally {
@@ -555,6 +630,66 @@ kdig -d @${new URL(origin).hostname} +https=${config.path} linux.do A</code></pr
         btn.innerText = '查询';
       }
     }
+
+    async function loadStats() {
+      try {
+        const resp = await fetch('/api/stats');
+        if (!resp.ok) return;
+        const data = await resp.json();
+
+        // Domestic
+        const dom = (data.upstreams && data.upstreams.domestic) ? data.upstreams.domestic : { upstreams: {}, totalWins: 0 };
+        const ali = dom.upstreams['dns.alidns.com'] || { wins: 0, winRate: '0.0%' };
+        const pod = dom.upstreams['doh.pub'] || { wins: 0, winRate: '0.0%' };
+        document.getElementById('domesticTotalWins').innerText = dom.totalWins + ' 次胜出';
+        document.getElementById('winAlidns').innerText = ali.wins + ' (' + ali.winRate + ')';
+        document.getElementById('winDohpub').innerText = pod.wins + ' (' + pod.winRate + ')';
+        const domTotal = ali.wins + pod.wins;
+        const aliPct = domTotal > 0 ? (ali.wins / domTotal) * 100 : 50;
+        document.getElementById('barAlidns').style.width = aliPct + '%';
+        document.getElementById('barDohpub').style.width = (100 - aliPct) + '%';
+
+        if (data.latency && data.latency.domestic) {
+          document.getElementById('p50Domestic').innerText = (data.latency.domestic.p50Ms || 0) + ' ms';
+          document.getElementById('p95Domestic').innerText = (data.latency.domestic.p95Ms || 0) + ' ms';
+          document.getElementById('avgDomestic').innerText = (data.latency.domestic.avgMs || 0) + ' ms';
+        }
+
+        // Global
+        const glob = (data.upstreams && data.upstreams.global) ? data.upstreams.global : { upstreams: {}, totalWins: 0 };
+        const ggl = glob.upstreams['dns.google'] || { wins: 0, winRate: '0.0%' };
+        const cf = glob.upstreams['cloudflare-dns.com'] || { wins: 0, winRate: '0.0%' };
+        document.getElementById('globalTotalWins').innerText = glob.totalWins + ' 次胜出';
+        document.getElementById('winGoogle').innerText = ggl.wins + ' (' + ggl.winRate + ')';
+        document.getElementById('winCf').innerText = cf.wins + ' (' + cf.winRate + ')';
+        const globTotal = ggl.wins + cf.wins;
+        const gglPct = globTotal > 0 ? (ggl.wins / globTotal) * 100 : 50;
+        document.getElementById('barGoogle').style.width = gglPct + '%';
+        document.getElementById('barCf').style.width = (100 - gglPct) + '%';
+
+        if (data.latency && data.latency.global) {
+          document.getElementById('p50Global').innerText = (data.latency.global.p50Ms || 0) + ' ms';
+          document.getElementById('p95Global').innerText = (data.latency.global.p95Ms || 0) + ' ms';
+          document.getElementById('avgGlobal').innerText = (data.latency.global.avgMs || 0) + ' ms';
+        }
+
+        if (data.cache) {
+          document.getElementById('cacheHitRate').innerText = data.cache.hitRate || '0.0%';
+        }
+        if (typeof data.totalRequests !== 'undefined') {
+          document.getElementById('totalRequests').innerText = data.totalRequests;
+        }
+        if (typeof data.uptimeSec !== 'undefined') {
+          document.getElementById('nodeUptime').innerText = data.uptimeSec + 's';
+        }
+      } catch (err) {
+        console.warn('Failed to load stats:', err);
+      }
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      loadStats();
+    });
 
     function switchTab(name) {
       const contents = document.querySelectorAll('.tab-content');

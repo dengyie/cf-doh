@@ -213,6 +213,31 @@ export async function refreshRules(env, fetcher = fetch) {
   }
 }
 
+/** Adopt raw text directly into live memory cache and persist to KV (for Webhook sync). */
+export async function adoptRawRules(text, env) {
+  if (typeof text !== "string" || text.trim().length === 0) {
+    throw new Error("rules_empty");
+  }
+  if (text.toLowerCase().includes("<html")) {
+    throw new Error("rules_html_response");
+  }
+  const bytes = ENC.encode(text);
+  if (bytes.byteLength > KV_MAX_BYTES) {
+    throw new Error("rules_too_large");
+  }
+  const parsed = parseRuleText(text);
+  const rule = { ...parsed, data: text };
+  live = rule;
+  failUntil = 0;
+  if (env && env.RULES_KV) {
+    await env.RULES_KV.put(KV_KEY, bytes);
+  }
+  return {
+    ruleCount: parsed.plain.length + parsed.full.size + parsed.regexp.length,
+    bytes: bytes.byteLength,
+  };
+}
+
 /** Load a ruleset from literal text (tests / custom small lists). */
 export function loadRulesFromText(text) {
   return { ...parseRuleText(text), data: text };

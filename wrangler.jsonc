@@ -16,6 +16,15 @@
     }
   ],
 
+  // Cloudflare Workers Analytics Engine: tracks query latencies, upstream win-rates,
+  // and status codes at edge scale. Optional: worker functions gracefully without it.
+  "analytics_engine_datasets": [
+    {
+      "binding": "DOH_ANALYTICS",
+      "dataset": "cf_doh_metrics"
+    }
+  ],
+
   // Cron: refresh the rule list daily (04:17 UTC).
   "triggers": {
     "crons": ["17 4 * * *"]
@@ -36,6 +45,9 @@
     "DNSSEC": "1",
     "BLOCK_ACTION": "nxdomain",
     "JSON_PATH": "/json"
+
+    // Optional webhook secret for GitHub Actions / external rule sync (/api/rules/sync):
+    // "RULES_SYNC_SECRET": "your-secure-sync-secret-key",
 
     // Optional blocklist: set BLOCK_URL to a plain-text URL (one pattern/line,
     // supports plain / full:domain / regexp:..). Leave unset to disable filtering.

@@ -51,6 +51,8 @@
 | **规则库容错防护** | ❌ 无 | ❌ 远程列表损坏直接导致整个解析宕机 | **🔒 内存单飞 + KV 镜像 + 格式强校验 + 失败回退** |
 | **DNSSEC 支持** | ✅ 支持 | ❌ 大多数剥离或伪造 AD 位 | **✅ RFC 兼容的 DNSSEC AD 智能透传** |
 | **交互式 Web 控制台** | ❌ 404 或无界面 | ❌ 简陋纯文本或 400 | **✨ 内置现代化响应式 Web 仪表盘 + 在线实时调试台** |
+| **性能度量与可视化** | ❌ 仅全局统计 | ❌ 无 | **📊 Cloudflare Analytics Engine + P95 / 胜出率实时可视化看板** |
+| **规则热更新 (免部署)** | - | ❌ 需重新打包部署 | **⚡ GitHub Action 自动同步 + Webhook 秒级推送写入 KV** |
 | **API 兼容性** | 仅标准 DoH | 仅标准 DoH | **✅ RFC 8484 + Google 风格 JSON API + 完整 CORS** |
 | **广告 / 恶意拦截** | 依赖特定 IP | ❌ 无 | **🛡️ 可选 Blocklist 规则拦截（NXDOMAIN / 0.0.0.0）** |
 | **运行时依赖** | - | 部分依赖庞大 npm 包 | **🌱 0 外部运行时依赖，秒级冷启动** |
@@ -196,6 +198,69 @@ kdig -d @doh.yourdomain.com +https=/doh linux.do A
 | `RULES_URL` | *(默认国内列表)* | 外部规则源 URL（每行一个域名，支持 `full:` 及 `regexp:`） |
 | `BLOCK_URL` | *(空)* | 拦截黑名单 URL。设置后命中域名直接拦截 |
 | `BLOCK_ACTION` | `nxdomain` | 拦截行为：`nxdomain`（不存在）或 `zero`（黑洞 0.0.0.0/::） |
+| `RULES_SYNC_SECRET` | *(空)* | 规则同步 Webhook 密钥。用于 GitHub Actions 或第三方推送规则至 `/api/rules/sync` |
+
+---
+
+## 📊 统计度量与可视化监控 (Analytics Engine)
+
+本项目实现了低开销的边缘性能监控与胜出率实时度量：
+
+### 1. 内置 Web 监控看板
+访问您的 Worker 首页（如 `https://doh.yourdomain.com/`），即可看到可视化的监控看板：
+- **🇨🇳 国内组竞速 (AliDNS vs DNSPod)**：实时展示两者的胜出次数与比例进度条，以及 P50 / P95 / Avg 解析延迟。
+- **🌐 全球组竞速 (Google vs Cloudflare)**：实时对比两大全球 DNS 的胜出份额与链路时延。
+- **📦 边缘缓存与请求指标**：直观反映缓存命中率（Cache Hit Rate）、服务运行时间及请求总量。
+
+### 2. 结构化度量接口
+- **竞速统计 API**：`GET /api/stats`（输出包括各上游胜率、延迟百分位数等 JSON 结构）。
+- **节点健康检查**：`GET /healthz`（包含系统运行时间、各计数器指标及最新配置）。
+
+### 3. Cloudflare Workers Analytics Engine 接入
+在 `wrangler.jsonc` 中已预置配置：
+```jsonc
+"analytics_engine_datasets": [
+  { "binding": "DOH_ANALYTICS", "dataset": "cf_doh_metrics" }
+]
+```
+每次解析请求完成后，Worker 会自动异步打点上报至 Cloudflare Analytics Engine：
+- **Blobs**：`[winningUpstream, group, qtype, rcode, cacheStatus]`
+- **Doubles**：`[durationMs]`
+- **Indexes**：`[winningUpstream]`
+
+支持在 Cloudflare Dashboard 或通过 GraphQL / SQL API 执行全局海量日志分析与 P95/P99 趋势统计！
+
+---
+
+## ⚡ 规则自动热更新 (GitHub Actions & Webhook)
+
+无需重新打包或部署 Worker，即可实现国内直连规则的每日自动更新与 KV 持久化！
+
+### 1. 自动化流水线 (`.github/workflows/sync-rules.yml`)
+仓库内置了生产级 GitHub Actions 定时同步工作流：
+1. **定时触发**：每天 UTC 04:00 自动从上游（如 Loyalsoldier release）抓取最新直连域名。
+2. **个人保障**：自动合并本地 [`sample-rules/direct-personal.txt`](sample-rules/direct-personal.txt)，确保 `linux.do`、`github.com` 直连绝对不丢失。
+3. **格式强校验**：过滤空行与脏注释，校验关键域名存在性，拦截 HTML 异常响应。
+4. **一键推送**：通过 Worker 专属 Webhook 接口将规则推送到 Cloudflare KV 并热加载到内存。
+
+### 2. 配置 GitHub 仓库 Secrets
+在您 Fork 或私有的本仓库中进入 **Settings -> Secrets and variables -> Actions**，添加以下密钥：
+- `DOH_ENDPOINT`：您的 Worker 完整域名（例如 `https://doh.yourdomain.com`）。
+- `RULES_SYNC_SECRET`：在 Worker 环境变量中配置的同步密钥。
+- *(可选)* `CLOUDFLARE_API_TOKEN` 与 `CLOUDFLARE_ACCOUNT_ID`：若需要 Action 直接调用 Wrangler 写入 KV 时提供。
+
+### 3. 手动或第三方 Webhook 触发
+```bash
+# Push 模式：直接推送自定义规则文本
+curl -X POST "https://doh.yourdomain.com/api/rules/sync" \
+  -H "Authorization: Bearer YOUR_SYNC_SECRET" \
+  -H "Content-Type: text/plain" \
+  --data-binary @my-rules.txt
+
+# Pull 模式：触发 Worker 立即重新拉取远程 RULES_URL
+curl -X POST "https://doh.yourdomain.com/api/rules/sync" \
+  -H "Authorization: Bearer YOUR_SYNC_SECRET"
+```
 
 ---
 

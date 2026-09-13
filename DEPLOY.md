@@ -45,6 +45,14 @@ npx wrangler deploy
 
 ---
 
+## 环境变量与可选绑定
+
+在 Cloudflare 控制台的 **Settings -> Variables and Secrets** 中可按需添加：
+- `RULES_SYNC_SECRET`：用于自动同步规则的 Webhook 密钥（与 GitHub Actions 配合使用）。
+- `DOH_ANALYTICS`：可在 **Settings -> Bindings -> Add -> Workers Analytics Engine** 添加名为 `DOH_ANALYTICS` 的绑定（Dataset 名为 `cf_doh_metrics`），即可开启云端海量指标监控。
+
+---
+
 ## 绑定自定义域名（重要）
 
 由于 `*.workers.dev` 二级域名在大陆网络受限，部署后请务必绑定自定义域名：

@@ -3,7 +3,19 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const dir = dirname(fileURLToPath(import.meta.url));
-const tests = ["dns.test.mjs", "cache.test.mjs", "cache.worker.mjs", "routing.mjs", "ecs.forward.mjs", "filter-json-dnssec.mjs", "hardening.mjs", "landing.cors.mjs", "bundle.smoke.mjs"];
+const tests = [
+  "dns.test.mjs",
+  "cache.test.mjs",
+  "cache.worker.mjs",
+  "routing.mjs",
+  "ecs.forward.mjs",
+  "filter-json-dnssec.mjs",
+  "hardening.mjs",
+  "landing.cors.mjs",
+  "analytics.test.mjs",
+  "rules-sync.test.mjs",
+  "bundle.smoke.mjs",
+];
 let allOk = true;
 for (const t of tests) {
   process.stdout.write(`\n=== ${t} ===\n`);
