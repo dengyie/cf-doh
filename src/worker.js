@@ -323,10 +323,19 @@ async function resolveAndRelay(wireQuery, parsed, request, env, config) {
   const result = await resolveWithCache(parsed, wireQuery, subnet, ecsKey, domestic, config, env);
   if (!result) return { ok: false };
 
-  // DNSSEC AD masking: pass upstream AD to DNSSEC-capable clients only.
+  // Cache hit or DNSSEC masking: clone answer buffer to avoid mutating the in-memory cache entry.
   let answer = result.answer;
-  if (config.dnssec) {
+  if (result.cached) {
+    // RFC 1035 §4.1.1: stamp the current query's Transaction ID on cached responses
     answer = answer.slice();
+    answer[0] = (parsed.id >> 8) & 0xff;
+    answer[1] = parsed.id & 0xff;
+  } else if (config.dnssec) {
+    answer = answer.slice();
+  }
+
+  // DNSSEC AD masking: pass upstream AD to DNSSEC-capable clients only.
+  if (config.dnssec) {
     applyRelayedDnssec(answer, clientRequestedDnssec(parsed));
   }
   return { ok: true, answer };
@@ -520,7 +529,17 @@ async function resolveWithCache(parsed, query, subnet, ecsKey, domestic, config,
   if (config.cacheTtlSeconds > 0) {
     // Cache for min(answer TTL, config TTL).
     let ttl = answerTtlSeconds(result.answer, parsed);
-    if (ttl <= 0) ttl = config.cacheTtlSeconds;
+    const flags = (result.answer[2] << 8) | result.answer[3];
+    const rcode = flags & 0x000f;
+    const ancount = (result.answer[6] << 8) | result.answer[7];
+
+    // RFC 2308: Clamp negative response TTL (NXDOMAIN or NODATA) to conservative limit (30s)
+    if (rcode === 3 || ancount === 0) {
+      const maxNegTtl = Math.min(config.cacheTtlSeconds, 30);
+      ttl = ttl <= 0 ? maxNegTtl : Math.min(ttl, maxNegTtl);
+    } else if (ttl <= 0) {
+      ttl = config.cacheTtlSeconds;
+    }
     dnsCache.set(qname, qtype, ecsKey, result.answer, Math.min(ttl, config.cacheTtlSeconds));
   }
   return result;

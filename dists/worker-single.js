@@ -303,9 +303,16 @@ function answerTtlSeconds(buf, info) {
     sawRecord = true;
     if (ttl < minTtl) minTtl = ttl;
     if (type === 6) {
-      const minFieldOff = rdataOff + 2 + 2 + 16;
-      const minimum = toU32At(minFieldOff);
-      if (minimum < minTtl) minTtl = minimum;
+      try {
+        const { end: mnameEnd } = decodeName(buf, rdataOff);
+        const { end: rnameEnd } = decodeName(buf, mnameEnd);
+        const minFieldOff = rnameEnd + 16;
+        if (minFieldOff + 4 <= buf.length) {
+          const minimum = toU32At(minFieldOff);
+          if (minimum < minTtl) minTtl = minimum;
+        }
+      } catch {
+      }
     }
     cursor = next;
     if (cursor > buf.length) break;
@@ -1314,7 +1321,19 @@ async function queryGlobalStats(env = {}, config = {}, { interval = "1 DAY" } = 
       fallback: statsSnapshot(config)
     };
   }
-  const safeInterval = interval.replace(/[^0-9A-Za-z ]/g, "") || "1 DAY";
+  const ALLOWED_INTERVALS = /* @__PURE__ */ new Set([
+    "1 HOUR",
+    "6 HOUR",
+    "12 HOUR",
+    "1 DAY",
+    "2 DAY",
+    "3 DAY",
+    "7 DAY",
+    "14 DAY",
+    "30 DAY"
+  ]);
+  const cleanedInterval = String(interval || "").trim().toUpperCase();
+  const safeInterval = ALLOWED_INTERVALS.has(cleanedInterval) ? cleanedInterval : "1 DAY";
   const sql = `
 SELECT
   blob1 AS host,
@@ -2485,8 +2504,14 @@ async function resolveAndRelay(wireQuery, parsed, request, env, config) {
   const result = await resolveWithCache(parsed, wireQuery, subnet, ecsKey, domestic, config, env);
   if (!result) return { ok: false };
   let answer = result.answer;
-  if (config.dnssec) {
+  if (result.cached) {
     answer = answer.slice();
+    answer[0] = parsed.id >> 8 & 255;
+    answer[1] = parsed.id & 255;
+  } else if (config.dnssec) {
+    answer = answer.slice();
+  }
+  if (config.dnssec) {
     applyRelayedDnssec(answer, clientRequestedDnssec(parsed));
   }
   return { ok: true, answer };
@@ -2658,7 +2683,15 @@ async function resolveWithCache(parsed, query, subnet, ecsKey, domestic, config,
   });
   if (config.cacheTtlSeconds > 0) {
     let ttl = answerTtlSeconds(result.answer, parsed);
-    if (ttl <= 0) ttl = config.cacheTtlSeconds;
+    const flags = result.answer[2] << 8 | result.answer[3];
+    const rcode = flags & 15;
+    const ancount = result.answer[6] << 8 | result.answer[7];
+    if (rcode === 3 || ancount === 0) {
+      const maxNegTtl = Math.min(config.cacheTtlSeconds, 30);
+      ttl = ttl <= 0 ? maxNegTtl : Math.min(ttl, maxNegTtl);
+    } else if (ttl <= 0) {
+      ttl = config.cacheTtlSeconds;
+    }
     dnsCache.set(qname, qtype, ecsKey, result.answer, Math.min(ttl, config.cacheTtlSeconds));
   }
   return result;

@@ -318,7 +318,19 @@ export async function queryGlobalStats(env = {}, config = {}, { interval = "1 DA
     };
   }
 
-  const safeInterval = interval.replace(/[^0-9A-Za-z ]/g, "") || "1 DAY";
+  const ALLOWED_INTERVALS = new Set([
+    "1 HOUR",
+    "6 HOUR",
+    "12 HOUR",
+    "1 DAY",
+    "2 DAY",
+    "3 DAY",
+    "7 DAY",
+    "14 DAY",
+    "30 DAY",
+  ]);
+  const cleanedInterval = String(interval || "").trim().toUpperCase();
+  const safeInterval = ALLOWED_INTERVALS.has(cleanedInterval) ? cleanedInterval : "1 DAY";
   const sql = `
 SELECT
   blob1 AS host,

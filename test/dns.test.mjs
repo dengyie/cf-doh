@@ -5,7 +5,7 @@
  * so we test only the pure wire-format + rule + IP + ECS building.
  */
 
-import { parseDnsMessage, buildErrorResponse } from "../src/dns.js";
+import { parseDnsMessage, buildErrorResponse, answerTtlSeconds } from "../src/dns.js";
 import { encodeEcsRdata, wrapEcsOption } from "../src/ecs.js";
 import { parseIpString, subnetForEcs } from "../src/ip.js";
 import { loadRulesFromText, isDomestic } from "../src/rules.js";
@@ -124,6 +124,45 @@ regexp:^spec\\.example\\.org$
   assert(isDomestic("x.super-exact.io", rules) === false, "full must not match subdomain");
   assert(isDomestic("spec.example.org", rules) === true, "regexp matches");
   assert(isDomestic("github.org", rules) === false, "no match");
+}
+
+// answerTtlSeconds with uncompressed SOA record --------------------------------
+{
+  const qWire = buildQuery("nx.example.com", 1, 1, 0x1122);
+  const parsed = parseDnsMessage(qWire);
+
+  // Synthesize NXDOMAIN response with SOA in authority section
+  // MNAME = ns1.example.com (uncompressed, 17 bytes)
+  // RNAME = admin.example.com (uncompressed, 19 bytes)
+  // MINIMUM TTL = 45s
+  const mname = [3, 110, 115, 49, 7, 101, 120, 97, 109, 112, 108, 101, 3, 99, 111, 109, 0];
+  const rname = [5, 97, 100, 109, 105, 110, 7, 101, 120, 97, 109, 112, 108, 101, 3, 99, 111, 109, 0];
+  const timers = [
+    0x00, 0x01, 0x00, 0x00, // serial
+    0x00, 0x00, 0x1c, 0x20, // refresh (7200)
+    0x00, 0x00, 0x0e, 0x10, // retry (3600)
+    0x00, 0x12, 0x75, 0x00, // expire (1209600)
+    0x00, 0x00, 0x00, 0x2d, // minimum (45s)
+  ];
+  const rdata = [...mname, ...rname, ...timers];
+  const soaRr = [
+    0, // owner root
+    0, 6, // type SOA
+    0, 1, // class IN
+    0, 0, 1, 44, // TTL 300s
+    rdata.length >> 8, rdata.length & 0xff, // rdlength
+    ...rdata,
+  ];
+
+  const resp = new Uint8Array(qWire.length + soaRr.length);
+  resp.set(qWire, 0);
+  resp[2] = 0x81; resp[3] = 0x83; // QR=1, RA=1, NXDOMAIN(3)
+  resp[6] = 0; resp[7] = 0; // ANCOUNT=0
+  resp[8] = 0; resp[9] = 1; // NSCOUNT=1 (SOA)
+  resp.set(soaRr, qWire.length);
+
+  const ttl = answerTtlSeconds(resp, parsed);
+  assert(ttl === 45, "answerTtlSeconds accurately parses variable-length uncompressed SOA MINIMUM field");
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

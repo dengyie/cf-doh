@@ -410,13 +410,21 @@ export function answerTtlSeconds(buf, info) {
     sawRecord = true;
     if (ttl < minTtl) minTtl = ttl;
     if (type === 6) {
-      // SOA RDATA layout: MNAME (name, usually a compression pointer, 2 bytes)
-      // RNAME (name, pointer, 2 bytes) SERIAL(4) REFRESH(4) RETRY(4)
-      // EXPIRE(4) MINIMUM(4). MINIMUM ends at rdataOff + 2 + 2 + 20 - 4.
-      // = rdataOff + 20, reading 4 bytes.
-      const minFieldOff = rdataOff + 2 + 2 + 16; // after the two names + 16 bytes
-      const minimum = toU32At(minFieldOff);
-      if (minimum < minTtl) minTtl = minimum;
+      // SOA RDATA layout per RFC 1035 §3.3.13:
+      // MNAME (variable), RNAME (variable),
+      // SERIAL (4), REFRESH (4), RETRY (4), EXPIRE (4), MINIMUM (4)
+      // Decode MNAME and RNAME safely (handling both compressed pointers and literal labels).
+      try {
+        const { end: mnameEnd } = decodeName(buf, rdataOff);
+        const { end: rnameEnd } = decodeName(buf, mnameEnd);
+        const minFieldOff = rnameEnd + 16; // skip SERIAL(4), REFRESH(4), RETRY(4), EXPIRE(4)
+        if (minFieldOff + 4 <= buf.length) {
+          const minimum = toU32At(minFieldOff);
+          if (minimum < minTtl) minTtl = minimum;
+        }
+      } catch {
+        /* Ignore malformed SOA RDATA */
+      }
     }
     cursor = next;
     if (cursor > buf.length) break;

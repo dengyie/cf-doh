@@ -55,13 +55,19 @@ const check = (c, l) => { console.log(c ? `  ok - ${l}` : `  FAIL - ${l}`); if (
 
 // first query -> upstream miss
 upstreamCalls = 0;
-await mod.handleRequest(req(0x1000, "1.2.3.4"), env);
+const resp1 = await mod.handleRequest(req(0x1000, "1.2.3.4"), env);
+const body1 = new Uint8Array(await resp1.arrayBuffer());
+const id1 = (body1[0] << 8) | body1[1];
 check(upstreamCalls > 0, "first query hits upstream");
+check(id1 === 0x1000, "first response echoes query ID 0x1000");
 
-// identical query (same IP, same qname) -> cache hit, no upstream call
+// identical query with distinct ID (same IP, same qname) -> cache hit, no upstream call
 const calls2 = upstreamCalls;
-await mod.handleRequest(req(0x1001, "1.2.3.4"), env);
+const resp2 = await mod.handleRequest(req(0x1001, "1.2.3.4"), env);
+const body2 = new Uint8Array(await resp2.arrayBuffer());
+const id2 = (body2[0] << 8) | body2[1];
 check(upstreamCalls === calls2, "second identical query served from cache (no upstream)");
+check(id2 === 0x1001, "second response (from cache) echoes query ID 0x1001 (RFC 1035 §4.1.1)");
 
 // Different ECS (different IP) -> different cache key -> miss -> fans out to BOTH global upstreams
 await mod.handleRequest(req(0x1002, "5.6.7.8"), env);

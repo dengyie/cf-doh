@@ -206,5 +206,37 @@ test("Worker routes /api/stats?scope=global and /api/stats/global properly", asy
   assert.equal(resp3.status, 200);
   const json3 = await resp3.json();
   assert.equal(json3.service, "cf-doh");
-  assert.equal(typeof json3.scope, "undefined"); // Local snapshot
-});
+    assert.equal(typeof json3.scope, "undefined"); // Local snapshot
+  });
+
+  test("queryGlobalStats enforces interval allowlist", async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      let capturedSql = "";
+      globalThis.fetch = async (_url, opts) => {
+        capturedSql = opts.body;
+        return new Response(JSON.stringify({ data: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      };
+
+      const env = {
+        CF_ACCOUNT_ID: "mock-account-id",
+        CF_ANALYTICS_READ_TOKEN: "mock-token",
+      };
+
+      // Valid interval '7 DAY'
+      await queryGlobalStats(env, {}, { interval: "7 DAY" });
+      assert.ok(capturedSql.includes("INTERVAL '7 DAY'"), "valid interval 7 DAY preserved");
+
+      // Invalid/dangerous interval should fallback to '1 DAY'
+      await queryGlobalStats(env, {}, { interval: "999999 DAY" });
+      assert.ok(capturedSql.includes("INTERVAL '1 DAY'"), "out-of-allowlist interval falls back to 1 DAY");
+
+      await queryGlobalStats(env, {}, { interval: "1 MICROSECOND" });
+      assert.ok(capturedSql.includes("INTERVAL '1 DAY'"), "unsupported interval falls back to 1 DAY");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
