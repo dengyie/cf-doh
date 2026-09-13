@@ -208,15 +208,17 @@ kdig -d @doh.yourdomain.com +https=/doh linux.do A
 
 ### 1. 内置 Web 监控看板
 访问您的 Worker 首页（如 `https://doh.yourdomain.com/`），即可看到可视化的监控看板：
+- **📍 本地 PoP 边缘 vs 🌐 全球多地域聚合**：控制台内置无缝切换开关，支持查看单个 Cloudflare 边缘节点的低延迟内存采样，或通过 Analytics Engine SQL API 聚合全球所有 PoP 节点的汇总度量！
 - **🇨🇳 国内组竞速 (AliDNS vs DNSPod)**：实时展示两者的胜出次数与比例进度条，以及 P50 / P95 / Avg 解析延迟。
 - **🌐 全球组竞速 (Google vs Cloudflare)**：实时对比两大全球 DNS 的胜出份额与链路时延。
 - **📦 边缘缓存与请求指标**：直观反映缓存命中率（Cache Hit Rate）、服务运行时间及请求总量。
 
 ### 2. 结构化度量接口
-- **竞速统计 API**：`GET /api/stats`（输出包括各上游胜率、延迟百分位数等 JSON 结构）。
+- **本地 PoP 竞速统计**：`GET /api/stats`（秒级输出当前 Worker 实例的内存采样统计）。
+- **全球跨 PoP 聚合统计**：`GET /api/stats?scope=global` 或 `GET /api/stats/global`（执行 Cloudflare Analytics Engine SQL API 聚合全球所有边缘节点指标）。
 - **节点健康检查**：`GET /healthz`（包含系统运行时间、各计数器指标及最新配置）。
 
-### 3. Cloudflare Workers Analytics Engine 接入
+### 3. Cloudflare Workers Analytics Engine 接入与全球聚合配置
 在 `wrangler.jsonc` 中已预置配置：
 ```jsonc
 "analytics_engine_datasets": [
@@ -228,7 +230,12 @@ kdig -d @doh.yourdomain.com +https=/doh linux.do A
 - **Doubles**：`[durationMs]`
 - **Indexes**：`[winningUpstream]`
 
-支持在 Cloudflare Dashboard 或通过 GraphQL / SQL API 执行全局海量日志分析与 P95/P99 趋势统计！
+**开启全球多地域 SQL 聚合（可选）**：
+1. 在 Cloudflare Dashboard 的 **Workers & Pages -> Analytics Engine** 点击 **Enable**（免费功能）；
+2. 在 Worker 环境变量或 `wrangler.jsonc` 的 `vars` 中配置：
+   - `CF_ACCOUNT_ID`: 您的 Cloudflare 账户 ID
+   - `CF_ANALYTICS_READ_TOKEN`: 具备 `Account Analytics Read` 权限的 API Token
+3. 前端控制台点击「🌐 全球多地域聚合」或请求 `/api/stats?scope=global` 即可自动执行聚合分析！如果未配置凭据，系统会自动平滑降级至本地 PoP 实时指标。
 
 ---
 

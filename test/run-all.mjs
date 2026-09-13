@@ -13,6 +13,7 @@ const tests = [
   "hardening.mjs",
   "landing.cors.mjs",
   "analytics.test.mjs",
+  "analytics-global.test.mjs",
   "rules-sync.test.mjs",
   "bundle.smoke.mjs",
 ];

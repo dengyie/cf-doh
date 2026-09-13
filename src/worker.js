@@ -193,7 +193,19 @@ export async function handleRequest(request, env) {
   if (url.pathname === "/healthz" || url.pathname === "/metrics") {
     return metrics.healthResponse(config);
   }
-  if (url.pathname === "/api/stats" || url.pathname === "/stats") {
+  if (
+    url.pathname === "/api/stats" ||
+    url.pathname === "/stats" ||
+    url.pathname === "/api/stats/global" ||
+    url.pathname === "/stats/global"
+  ) {
+    const scope =
+      url.searchParams.get("scope") ||
+      (url.pathname.endsWith("/global") ? "global" : "local");
+    if (scope === "global") {
+      const interval = url.searchParams.get("interval") || "1 DAY";
+      return metrics.globalStatsResponse(config, env, { interval });
+    }
     return metrics.statsResponse(config);
   }
   if (url.pathname === "/api/rules/sync" || url.pathname === "/rules/sync") {

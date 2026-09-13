@@ -51,6 +51,11 @@
     // Optional webhook secret for GitHub Actions / external rule sync (/api/rules/sync):
     // "RULES_SYNC_SECRET": "your-secure-sync-secret-key",
 
+    // Optional credentials for global multi-PoP Analytics Engine SQL query (/api/stats?scope=global):
+    // "CF_ACCOUNT_ID": "your-cloudflare-account-id",
+    // "CF_ANALYTICS_READ_TOKEN": "your-token-with-account-analytics-read-permission",
+    // "ANALYTICS_DATASET": "cf_doh_metrics",
+
     // Optional blocklist: set BLOCK_URL to a plain-text URL (one pattern/line,
     // supports plain / full:domain / regexp:..). Leave unset to disable filtering.
     // "BLOCK_URL": "https://example.com/blocklist.txt"

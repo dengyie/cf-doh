@@ -227,6 +227,24 @@ export function renderLandingHtml(origin, config) {
       color: #60a5fa;
       font-weight: 600;
     }
+    .scope-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      padding: 4px 10px;
+      font-size: 0.78rem;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 500;
+      transition: all 0.2s;
+    }
+    .scope-btn.active {
+      background: var(--primary);
+      color: #fff;
+    }
+    .scope-btn:hover:not(.active) {
+      color: var(--text);
+    }
     .code-block {
       position: relative;
       background: var(--code-bg);
@@ -372,14 +390,23 @@ export function renderLandingHtml(origin, config) {
 
     <!-- 📊 上游竞速与度量监控卡片 -->
     <div class="card" style="margin-bottom: 32px;">
-      <div class="card-title" style="justify-content: space-between; flex-wrap: wrap;">
+      <div class="card-title" style="justify-content: space-between; flex-wrap: wrap; gap: 10px;">
         <div style="display: flex; align-items: center; gap: 10px;">
           <span>📊</span>
           <span>上游并发竞速与延迟监控 (Racing & P95 Metrics)</span>
         </div>
-        <button class="btn" style="padding: 6px 12px; font-size: 0.82rem;" onclick="loadStats()">
-          <span>🔄</span><span>刷新指标</span>
-        </button>
+        <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+          <div style="display:inline-flex; background:rgba(255,255,255,0.06); border:1px solid var(--card-border); border-radius:8px; padding:2px; gap:2px;">
+            <button id="scopeLocalBtn" class="scope-btn active" onclick="setStatsScope('local')">📍 本地 PoP 边缘</button>
+            <button id="scopeGlobalBtn" class="scope-btn" onclick="setStatsScope('global')">🌐 全球多地域聚合</button>
+          </div>
+          <button class="btn" style="padding: 5px 12px; font-size: 0.8rem;" onclick="loadStats()">
+            <span>🔄</span><span>刷新指标</span>
+          </button>
+        </div>
+      </div>
+      <div id="scopeNotice" style="font-size:0.82rem; color:var(--text-muted); margin-bottom:12px; padding:6px 12px; background:rgba(255,255,255,0.03); border-radius:6px; border-left:3px solid var(--primary);">
+        📍 统计范围：当前 Cloudflare 边缘节点内存实时采样 (单实例)
       </div>
       <p style="font-size:0.88rem; color:var(--text-muted); margin-bottom:16px;">
         所有上游并发同时发起请求，延迟由最快节点决定。实时统计各上游的胜出比例、P50 / P95 解析延迟及边缘缓存效率。
@@ -432,8 +459,8 @@ export function renderLandingHtml(origin, config) {
       <div style="display:flex; flex-wrap:wrap; gap:16px; font-size:0.82rem; color:var(--text-muted);">
         <span>📦 边缘缓存命中率: <b id="cacheHitRate" style="color:var(--accent);">0.0%</b></span>
         <span>📈 累计服务请求: <b id="totalRequests" style="color:var(--text);">0</b></span>
-        <span>⏱️ 节点运行时间: <b id="nodeUptime" style="color:var(--text);">0s</b></span>
-        <span>☁️ Analytics Engine: <b style="color:var(--primary);">已接入 (Worker 点位写入)</b></span>
+        <span id="uptimeWrap">⏱️ 节点运行时间: <b id="nodeUptime" style="color:var(--text);">0s</b></span>
+        <span>☁️ Analytics Engine: <b id="analyticsStatus" style="color:var(--primary);">已接入 (Worker 点位写入)</b></span>
       </div>
     </div>
 
@@ -631,11 +658,54 @@ kdig -d @${new URL(origin).hostname} +https=${config.path} linux.do A</code></pr
       }
     }
 
-    async function loadStats() {
+    let currentScope = 'local';
+
+    function setStatsScope(scope) {
+      currentScope = scope;
+      const localBtn = document.getElementById('scopeLocalBtn');
+      const globalBtn = document.getElementById('scopeGlobalBtn');
+      if (scope === 'global') {
+        localBtn.classList.remove('active');
+        globalBtn.classList.add('active');
+      } else {
+        globalBtn.classList.remove('active');
+        localBtn.classList.add('active');
+      }
+      loadStats(scope);
+    }
+
+    async function loadStats(scope = currentScope) {
       try {
-        const resp = await fetch('/api/stats');
+        const url = scope === 'global' ? '/api/stats?scope=global' : '/api/stats';
+        const resp = await fetch(url);
         if (!resp.ok) return;
-        const data = await resp.json();
+        const rawData = await resp.json();
+        const isGlobal = scope === 'global';
+        const noticeEl = document.getElementById('scopeNotice');
+
+        let data = rawData;
+        if (isGlobal) {
+          if (rawData.available) {
+            noticeEl.innerHTML = '🌐 <b>全球多地域聚合数据 (Cloudflare Analytics Engine)</b> • 最近 24 小时跨所有 PoP 边缘节点总计';
+            noticeEl.style.borderLeftColor = '#10b981';
+            document.getElementById('analyticsStatus').innerText = '全局 SQL 查询已激活';
+            document.getElementById('analyticsStatus').style.color = '#10b981';
+            document.getElementById('uptimeWrap').style.display = 'none';
+          } else {
+            noticeEl.innerHTML = '⚠️ <b>全球聚合未开启或未配置读取凭据</b>：' + (rawData.message || '回退展示当前本地 PoP 数据') + '。可至 Cloudflare 控制台激活 Analytics Engine。';
+            noticeEl.style.borderLeftColor = '#f59e0b';
+            document.getElementById('analyticsStatus').innerText = '未激活全局读取 (展示本地)';
+            document.getElementById('analyticsStatus').style.color = '#f59e0b';
+            document.getElementById('uptimeWrap').style.display = 'inline';
+            if (rawData.fallback) data = rawData.fallback;
+          }
+        } else {
+          noticeEl.innerHTML = '📍 统计范围：当前 Cloudflare 边缘节点内存实时采样 (单实例)';
+          noticeEl.style.borderLeftColor = 'var(--primary)';
+          document.getElementById('analyticsStatus').innerText = '已接入 (Worker 点位写入)';
+          document.getElementById('analyticsStatus').style.color = 'var(--primary)';
+          document.getElementById('uptimeWrap').style.display = 'inline';
+        }
 
         // Domestic
         const dom = (data.upstreams && data.upstreams.domestic) ? data.upstreams.domestic : { upstreams: {}, totalWins: 0 };

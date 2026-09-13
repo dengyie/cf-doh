@@ -1134,6 +1134,185 @@ function statsResponse(config) {
     }
   });
 }
+function parseAnalyticsRows(rows, config = {}, dataset = "cf_doh_metrics") {
+  const domesticUrls = config.domesticUrls || [
+    config.domesticUrl || "https://dns.alidns.com/dns-query",
+    config.domesticFallbackUrl || "https://doh.pub/dns-query"
+  ];
+  const globalUrls = config.globalUrls || [
+    config.globalUrl || "https://dns.google/dns-query",
+    config.globalFallbackUrl || "https://cloudflare-dns.com/dns-query"
+  ];
+  let totalRequests = 0;
+  let cacheHits = 0;
+  let cacheMisses = 0;
+  const winCounts = {};
+  const domesticLatencies = [];
+  const globalLatencies = [];
+  for (const row of rows || []) {
+    const host = String(row.host || "unknown");
+    const group = String(row.group_name || "unknown");
+    const cacheStatus = String(row.cache_status || "miss");
+    const count = Number(row.total_count || row.count || 0);
+    const avg = Number(row.avg_duration || 0);
+    const p50 = Number(row.p50 || 0);
+    const p90 = Number(row.p90 || 0);
+    const p95 = Number(row.p95 || 0);
+    const min = Number(row.min_duration || 0);
+    const max = Number(row.max_duration || 0);
+    totalRequests += count;
+    if (cacheStatus === "hit") {
+      cacheHits += count;
+    } else {
+      cacheMisses += count;
+      if (host !== "cache" && host !== "unknown") {
+        winCounts[host] = (winCounts[host] || 0) + count;
+      }
+      if (group === "domestic") {
+        domesticLatencies.push({ count, avg, p50, p90, p95, min, max });
+      } else if (group === "global") {
+        globalLatencies.push({ count, avg, p50, p90, p95, min, max });
+      }
+    }
+  }
+  function buildGroupStats(urls) {
+    const list = urls.map((u) => {
+      let host = u;
+      try {
+        host = new URL(u).hostname;
+      } catch {
+      }
+      return { url: u, host, wins: winCounts[host] || 0 };
+    });
+    const totalWins = list.reduce((acc, item) => acc + item.wins, 0);
+    const res = {};
+    for (const item of list) {
+      res[item.host] = {
+        wins: item.wins,
+        winRate: totalWins > 0 ? `${(item.wins / totalWins * 100).toFixed(1)}%` : "0.0%"
+      };
+    }
+    return { upstreams: res, totalWins };
+  }
+  function aggregateLatency(list) {
+    const total = list.reduce((sum, item) => sum + item.count, 0);
+    if (total === 0) {
+      return { count: 0, avgMs: 0, p50Ms: 0, p90Ms: 0, p95Ms: 0, minMs: 0, maxMs: 0 };
+    }
+    const weightedAvg = list.reduce((sum, item) => sum + item.avg * item.count, 0) / total;
+    const weightedP50 = list.reduce((sum, item) => sum + item.p50 * item.count, 0) / total;
+    const maxP90 = Math.max(...list.map((item) => item.p90));
+    const maxP95 = Math.max(...list.map((item) => item.p95));
+    const minVal = Math.min(...list.map((item) => item.min));
+    const maxVal = Math.max(...list.map((item) => item.max));
+    return {
+      count: total,
+      avgMs: Math.round(weightedAvg * 10) / 10,
+      p50Ms: Math.round(weightedP50 * 10) / 10,
+      p90Ms: Math.round(maxP90 * 10) / 10,
+      p95Ms: Math.round(maxP95 * 10) / 10,
+      minMs: Math.round(minVal * 10) / 10,
+      maxMs: Math.round(maxVal * 10) / 10
+    };
+  }
+  const cacheTotal = cacheHits + cacheMisses;
+  const cacheHitRate = cacheTotal > 0 ? `${(cacheHits / cacheTotal * 100).toFixed(1)}%` : "0.0%";
+  return {
+    scope: "global",
+    available: true,
+    dataset,
+    timespan: "24h",
+    totalRequests,
+    cache: {
+      hits: cacheHits,
+      misses: cacheMisses,
+      hitRate: cacheHitRate
+    },
+    latency: {
+      domestic: aggregateLatency(domesticLatencies),
+      global: aggregateLatency(globalLatencies)
+    },
+    upstreams: {
+      domestic: buildGroupStats(domesticUrls),
+      global: buildGroupStats(globalUrls)
+    },
+    rawWins: { ...winCounts }
+  };
+}
+async function queryGlobalStats(env = {}, config = {}, { interval = "1 DAY" } = {}) {
+  const accountId = env.CF_ACCOUNT_ID || env.ACCOUNT_ID;
+  const token = env.CF_ANALYTICS_READ_TOKEN || env.CLOUDFLARE_API_TOKEN;
+  const dataset = env.ANALYTICS_DATASET || "cf_doh_metrics";
+  if (!accountId || !token) {
+    return {
+      scope: "global",
+      available: false,
+      reason: "missing_credentials",
+      message: "Global multi-PoP aggregation requires CF_ACCOUNT_ID and CF_ANALYTICS_READ_TOKEN (or CLOUDFLARE_API_TOKEN) environment variables.",
+      fallback: statsSnapshot(config)
+    };
+  }
+  const safeInterval = interval.replace(/[^0-9A-Za-z ]/g, "") || "1 DAY";
+  const sql = `
+SELECT
+  blob1 AS host,
+  blob2 AS group_name,
+  blob5 AS cache_status,
+  count() AS total_count,
+  avg(double1) AS avg_duration,
+  quantile(0.5)(double1) AS p50,
+  quantile(0.9)(double1) AS p90,
+  quantile(0.95)(double1) AS p95,
+  min(double1) AS min_duration,
+  max(double1) AS max_duration
+FROM ${dataset}
+WHERE timestamp >= NOW() - INTERVAL '${safeInterval}'
+GROUP BY host, group_name, cache_status
+FORMAT JSON
+  `.trim();
+  const url = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/analytics_engine/sql`;
+  try {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/sql"
+      },
+      body: sql
+    });
+    if (!resp.ok) {
+      const errText = await resp.text();
+      return {
+        scope: "global",
+        available: false,
+        reason: `http_${resp.status}`,
+        message: `Analytics Engine SQL API error (${resp.status}): ${errText.slice(0, 200)}`,
+        fallback: statsSnapshot(config)
+      };
+    }
+    const result = await resp.json();
+    const rows = Array.isArray(result?.data) ? result.data : [];
+    return parseAnalyticsRows(rows, config, dataset);
+  } catch (err) {
+    return {
+      scope: "global",
+      available: false,
+      reason: "network_error",
+      message: String(err?.message || err),
+      fallback: statsSnapshot(config)
+    };
+  }
+}
+async function globalStatsResponse(config, env, options) {
+  const stats = await queryGlobalStats(env, config, options);
+  return new Response(JSON.stringify(stats, null, 2), {
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+      "Access-Control-Allow-Origin": "*"
+    }
+  });
+}
 function healthResponse(config) {
   const body = JSON.stringify(
     {
@@ -1170,6 +1349,9 @@ var metrics = {
   recordAnalyticsPoint,
   statsSnapshot,
   statsResponse,
+  parseAnalyticsRows,
+  queryGlobalStats,
+  globalStatsResponse,
   healthResponse,
   resetMetrics
 };
@@ -1428,6 +1610,24 @@ function renderLandingHtml(origin, config) {
       color: #60a5fa;
       font-weight: 600;
     }
+    .scope-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      padding: 4px 10px;
+      font-size: 0.78rem;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 500;
+      transition: all 0.2s;
+    }
+    .scope-btn.active {
+      background: var(--primary);
+      color: #fff;
+    }
+    .scope-btn:hover:not(.active) {
+      color: var(--text);
+    }
     .code-block {
       position: relative;
       background: var(--code-bg);
@@ -1573,14 +1773,23 @@ function renderLandingHtml(origin, config) {
 
     <!-- \u{1F4CA} \u4E0A\u6E38\u7ADE\u901F\u4E0E\u5EA6\u91CF\u76D1\u63A7\u5361\u7247 -->
     <div class="card" style="margin-bottom: 32px;">
-      <div class="card-title" style="justify-content: space-between; flex-wrap: wrap;">
+      <div class="card-title" style="justify-content: space-between; flex-wrap: wrap; gap: 10px;">
         <div style="display: flex; align-items: center; gap: 10px;">
           <span>\u{1F4CA}</span>
           <span>\u4E0A\u6E38\u5E76\u53D1\u7ADE\u901F\u4E0E\u5EF6\u8FDF\u76D1\u63A7 (Racing & P95 Metrics)</span>
         </div>
-        <button class="btn" style="padding: 6px 12px; font-size: 0.82rem;" onclick="loadStats()">
-          <span>\u{1F504}</span><span>\u5237\u65B0\u6307\u6807</span>
-        </button>
+        <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+          <div style="display:inline-flex; background:rgba(255,255,255,0.06); border:1px solid var(--card-border); border-radius:8px; padding:2px; gap:2px;">
+            <button id="scopeLocalBtn" class="scope-btn active" onclick="setStatsScope('local')">\u{1F4CD} \u672C\u5730 PoP \u8FB9\u7F18</button>
+            <button id="scopeGlobalBtn" class="scope-btn" onclick="setStatsScope('global')">\u{1F310} \u5168\u7403\u591A\u5730\u57DF\u805A\u5408</button>
+          </div>
+          <button class="btn" style="padding: 5px 12px; font-size: 0.8rem;" onclick="loadStats()">
+            <span>\u{1F504}</span><span>\u5237\u65B0\u6307\u6807</span>
+          </button>
+        </div>
+      </div>
+      <div id="scopeNotice" style="font-size:0.82rem; color:var(--text-muted); margin-bottom:12px; padding:6px 12px; background:rgba(255,255,255,0.03); border-radius:6px; border-left:3px solid var(--primary);">
+        \u{1F4CD} \u7EDF\u8BA1\u8303\u56F4\uFF1A\u5F53\u524D Cloudflare \u8FB9\u7F18\u8282\u70B9\u5185\u5B58\u5B9E\u65F6\u91C7\u6837 (\u5355\u5B9E\u4F8B)
       </div>
       <p style="font-size:0.88rem; color:var(--text-muted); margin-bottom:16px;">
         \u6240\u6709\u4E0A\u6E38\u5E76\u53D1\u540C\u65F6\u53D1\u8D77\u8BF7\u6C42\uFF0C\u5EF6\u8FDF\u7531\u6700\u5FEB\u8282\u70B9\u51B3\u5B9A\u3002\u5B9E\u65F6\u7EDF\u8BA1\u5404\u4E0A\u6E38\u7684\u80DC\u51FA\u6BD4\u4F8B\u3001P50 / P95 \u89E3\u6790\u5EF6\u8FDF\u53CA\u8FB9\u7F18\u7F13\u5B58\u6548\u7387\u3002
@@ -1633,8 +1842,8 @@ function renderLandingHtml(origin, config) {
       <div style="display:flex; flex-wrap:wrap; gap:16px; font-size:0.82rem; color:var(--text-muted);">
         <span>\u{1F4E6} \u8FB9\u7F18\u7F13\u5B58\u547D\u4E2D\u7387: <b id="cacheHitRate" style="color:var(--accent);">0.0%</b></span>
         <span>\u{1F4C8} \u7D2F\u8BA1\u670D\u52A1\u8BF7\u6C42: <b id="totalRequests" style="color:var(--text);">0</b></span>
-        <span>\u23F1\uFE0F \u8282\u70B9\u8FD0\u884C\u65F6\u95F4: <b id="nodeUptime" style="color:var(--text);">0s</b></span>
-        <span>\u2601\uFE0F Analytics Engine: <b style="color:var(--primary);">\u5DF2\u63A5\u5165 (Worker \u70B9\u4F4D\u5199\u5165)</b></span>
+        <span id="uptimeWrap">\u23F1\uFE0F \u8282\u70B9\u8FD0\u884C\u65F6\u95F4: <b id="nodeUptime" style="color:var(--text);">0s</b></span>
+        <span>\u2601\uFE0F Analytics Engine: <b id="analyticsStatus" style="color:var(--primary);">\u5DF2\u63A5\u5165 (Worker \u70B9\u4F4D\u5199\u5165)</b></span>
       </div>
     </div>
 
@@ -1832,11 +2041,54 @@ kdig -d @${new URL(origin).hostname} +https=${config.path} linux.do A</code></pr
       }
     }
 
-    async function loadStats() {
+    let currentScope = 'local';
+
+    function setStatsScope(scope) {
+      currentScope = scope;
+      const localBtn = document.getElementById('scopeLocalBtn');
+      const globalBtn = document.getElementById('scopeGlobalBtn');
+      if (scope === 'global') {
+        localBtn.classList.remove('active');
+        globalBtn.classList.add('active');
+      } else {
+        globalBtn.classList.remove('active');
+        localBtn.classList.add('active');
+      }
+      loadStats(scope);
+    }
+
+    async function loadStats(scope = currentScope) {
       try {
-        const resp = await fetch('/api/stats');
+        const url = scope === 'global' ? '/api/stats?scope=global' : '/api/stats';
+        const resp = await fetch(url);
         if (!resp.ok) return;
-        const data = await resp.json();
+        const rawData = await resp.json();
+        const isGlobal = scope === 'global';
+        const noticeEl = document.getElementById('scopeNotice');
+
+        let data = rawData;
+        if (isGlobal) {
+          if (rawData.available) {
+            noticeEl.innerHTML = '\u{1F310} <b>\u5168\u7403\u591A\u5730\u57DF\u805A\u5408\u6570\u636E (Cloudflare Analytics Engine)</b> \u2022 \u6700\u8FD1 24 \u5C0F\u65F6\u8DE8\u6240\u6709 PoP \u8FB9\u7F18\u8282\u70B9\u603B\u8BA1';
+            noticeEl.style.borderLeftColor = '#10b981';
+            document.getElementById('analyticsStatus').innerText = '\u5168\u5C40 SQL \u67E5\u8BE2\u5DF2\u6FC0\u6D3B';
+            document.getElementById('analyticsStatus').style.color = '#10b981';
+            document.getElementById('uptimeWrap').style.display = 'none';
+          } else {
+            noticeEl.innerHTML = '\u26A0\uFE0F <b>\u5168\u7403\u805A\u5408\u672A\u5F00\u542F\u6216\u672A\u914D\u7F6E\u8BFB\u53D6\u51ED\u636E</b>\uFF1A' + (rawData.message || '\u56DE\u9000\u5C55\u793A\u5F53\u524D\u672C\u5730 PoP \u6570\u636E') + '\u3002\u53EF\u81F3 Cloudflare \u63A7\u5236\u53F0\u6FC0\u6D3B Analytics Engine\u3002';
+            noticeEl.style.borderLeftColor = '#f59e0b';
+            document.getElementById('analyticsStatus').innerText = '\u672A\u6FC0\u6D3B\u5168\u5C40\u8BFB\u53D6 (\u5C55\u793A\u672C\u5730)';
+            document.getElementById('analyticsStatus').style.color = '#f59e0b';
+            document.getElementById('uptimeWrap').style.display = 'inline';
+            if (rawData.fallback) data = rawData.fallback;
+          }
+        } else {
+          noticeEl.innerHTML = '\u{1F4CD} \u7EDF\u8BA1\u8303\u56F4\uFF1A\u5F53\u524D Cloudflare \u8FB9\u7F18\u8282\u70B9\u5185\u5B58\u5B9E\u65F6\u91C7\u6837 (\u5355\u5B9E\u4F8B)';
+          noticeEl.style.borderLeftColor = 'var(--primary)';
+          document.getElementById('analyticsStatus').innerText = '\u5DF2\u63A5\u5165 (Worker \u70B9\u4F4D\u5199\u5165)';
+          document.getElementById('analyticsStatus').style.color = 'var(--primary)';
+          document.getElementById('uptimeWrap').style.display = 'inline';
+        }
 
         // Domestic
         const dom = (data.upstreams && data.upstreams.domestic) ? data.upstreams.domestic : { upstreams: {}, totalWins: 0 };
@@ -2053,7 +2305,12 @@ async function handleRequest(request, env) {
   if (url.pathname === "/healthz" || url.pathname === "/metrics") {
     return metrics.healthResponse(config);
   }
-  if (url.pathname === "/api/stats" || url.pathname === "/stats") {
+  if (url.pathname === "/api/stats" || url.pathname === "/stats" || url.pathname === "/api/stats/global" || url.pathname === "/stats/global") {
+    const scope = url.searchParams.get("scope") || (url.pathname.endsWith("/global") ? "global" : "local");
+    if (scope === "global") {
+      const interval = url.searchParams.get("interval") || "1 DAY";
+      return metrics.globalStatsResponse(config, env, { interval });
+    }
     return metrics.statsResponse(config);
   }
   if (url.pathname === "/api/rules/sync" || url.pathname === "/rules/sync") {
