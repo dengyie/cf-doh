@@ -27,11 +27,22 @@ async function testRulesSync() {
   assert.equal(getResp.status, 405);
   console.log("  ok - GET /api/rules/sync returns 405 Method Not Allowed");
 
-  // 2. No RULES_SYNC_SECRET configured on server returns 403
+  // 2. No RULES_SYNC_SECRET configured on server returns 403 (even if DOH_TOKEN is present)
   const noSecretReq = new Request("https://doh.example.com/api/rules/sync", { method: "POST" });
   const noSecretResp = await worker.fetch(noSecretReq, {});
   assert.equal(noSecretResp.status, 403);
   console.log("  ok - unconfigured secret returns 403 Forbidden");
+
+  // 2b. DOH_TOKEN does NOT grant access to rules sync (privilege separation)
+  const dohTokenEnv = { DOH_TOKEN: "client-query-token-xyz" };
+  const tokenEscapeReq = new Request("https://doh.example.com/api/rules/sync", {
+    method: "POST",
+    headers: { Authorization: "Bearer client-query-token-xyz" },
+    body: "evil-hijack.com",
+  });
+  const tokenEscapeResp = await worker.fetch(tokenEscapeReq, dohTokenEnv);
+  assert.equal(tokenEscapeResp.status, 403);
+  console.log("  ok - DOH_TOKEN cannot be used to sync rules (privilege separation enforced)");
 
   // 3. Wrong secret returns 401
   const wrongAuthReq = new Request("https://doh.example.com/api/rules/sync", {
@@ -99,7 +110,7 @@ my-special-domain.internal
   assert.equal(isDomestic("json-synced-domain.com", updatedLiveRules), true);
   console.log("  ok - JSON body payload successfully parsed and applied");
 
-  console.log("\n7 passed, 0 failed\n");
+  console.log("\n8 passed, 0 failed\n");
 }
 
 testRulesSync();

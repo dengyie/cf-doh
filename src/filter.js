@@ -21,6 +21,7 @@ let coldInflight = null;
 
 function parseRuleText(text) {
   const plain = [];
+  const plainSet = new Set();
   const full = new Set();
   const regexp = [];
   for (const raw of text.split("\n")) {
@@ -31,11 +32,13 @@ function parseRuleText(text) {
     } else if (line.startsWith("regexp:")) {
       regexp.push(new RegExp(line.slice(7).trim(), "i"));
     } else {
-      plain.push(line.toLowerCase());
+      const d = line.toLowerCase();
+      plain.push(d);
+      plainSet.add(d);
     }
   }
   plain.sort();
-  return { plain, full, regexp, version: text.length };
+  return { plain, plainSet, full, regexp, version: text.length };
 }
 
 /** Load a rule object from literal text (tests / literal list). */
@@ -46,13 +49,27 @@ export function loadBlockFromText(text) {
 function matches(qname, rule) {
   const q = qname.toLowerCase();
   if (!rule) return false;
-  if (rule.full.has(q)) return true;
-  for (let i = 0; i < rule.plain.length; i += 1) {
-    const p = rule.plain[i];
-    if (q === p || q.endsWith(`.${p}`)) return true;
+  if (rule.full && rule.full.has(q)) return true;
+
+  if (rule.plainSet) {
+    if (rule.plainSet.has(q)) return true;
+    let dotIdx = q.indexOf(".");
+    while (dotIdx !== -1) {
+      const parent = q.slice(dotIdx + 1);
+      if (rule.plainSet.has(parent)) return true;
+      dotIdx = q.indexOf(".", dotIdx + 1);
+    }
+  } else if (rule.plain) {
+    for (let i = 0; i < rule.plain.length; i += 1) {
+      const p = rule.plain[i];
+      if (q === p || q.endsWith(`.${p}`)) return true;
+    }
   }
-  for (let i = 0; i < rule.regexp.length; i += 1) {
-    if (rule.regexp[i].test(q)) return true;
+
+  if (rule.regexp) {
+    for (let i = 0; i < rule.regexp.length; i += 1) {
+      if (rule.regexp[i].test(q)) return true;
+    }
   }
   return false;
 }

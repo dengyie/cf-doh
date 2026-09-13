@@ -22,8 +22,13 @@ import {
   validateUpstreamResponse,
 } from "./dns.js";
 
-async function queryUpstream(url, query, { timeoutMs, maxResponseBytes }) {
+async function queryUpstream(url, query, { timeoutMs, maxResponseBytes, signal }) {
   const controller = new AbortController();
+  const onParentAbort = () => controller.abort();
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener("abort", onParentAbort, { once: true });
+  }
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const start = performance.now();
   try {
@@ -51,6 +56,7 @@ async function queryUpstream(url, query, { timeoutMs, maxResponseBytes }) {
     return { ok: false, reason: controller.signal.aborted ? "timeout" : "network", durationMs };
   } finally {
     clearTimeout(timer);
+    if (signal) signal.removeEventListener("abort", onParentAbort);
   }
 }
 
@@ -74,11 +80,12 @@ function classify(r) {
  * `on` (optional) is called with { kind, url } for each settled upstream.
  */
 export async function raceGroup(urls, query, parsedInfo, { timeoutMs, maxResponseBytes, on }) {
+  const groupController = new AbortController();
   const settle = (r) => {
     if (on) on({ kind: classify(r), url: r.url, durationMs: r.durationMs ?? 0 });
   };
   const pending = urls.map(async (url) => {
-    const res = await queryUpstream(url, query, { timeoutMs, maxResponseBytes });
+    const res = await queryUpstream(url, query, { timeoutMs, maxResponseBytes, signal: groupController.signal });
     return { url, ...res };
   });
 
@@ -96,6 +103,8 @@ export async function raceGroup(urls, query, parsedInfo, { timeoutMs, maxRespons
             try {
               const flags = validateUpstreamResponse(r.body, parsedInfo ?? null);
               if ((flags & 0x000f) !== 2) {
+                // First valid winner settles the race; cancel remaining slow in-flight queries
+                groupController.abort();
                 resolve({ answer: r.body, from: r.url, durationMs: r.durationMs ?? 0 });
                 return;
               }

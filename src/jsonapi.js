@@ -61,46 +61,69 @@ function readName(b, o) {
 }
 
 /** Render answer/authority record RDATA as a string (common types). */
-function rdataString(type, rd, off, len, nameReader) {
+function rdataString(type, wire, off, len) {
   switch (type) {
-    case 1:
-      return rd.length >= 4 ? `${rd[0]}.${rd[1]}.${rd[2]}.${rd[3]}` : "";
+    case 1: {
+      if (len < 4 || off + 4 > wire.length) return "";
+      return `${wire[off]}.${wire[off + 1]}.${wire[off + 2]}.${wire[off + 3]}`;
+    }
     case 28: {
-      if (rd.length < 16) return "";
+      if (len < 16 || off + 16 > wire.length) return "";
       const h = [];
-      for (let i = 0; i < 8; i++) h.push(((rd[i * 2] << 8) | rd[i * 2 + 1]).toString(16));
+      for (let i = 0; i < 8; i++) {
+        const idx = off + i * 2;
+        h.push(((wire[idx] << 8) | wire[idx + 1]).toString(16));
+      }
       return h.join(":");
     }
     case 5:
     case 2:
     case 12: {
-      const r = readName(rd, 0);
+      // CNAME, NS, PTR: domain name (RFC 1035 §4.1.4 allows compression relative to wire)
+      const r = readName(wire, off);
       return r.name;
     }
-    case 16:
-      return rd.length ? JSON.stringify(DECODE.decode(rd)) : "";
+    case 16: {
+      // TXT: one or more <character-string> = 1 byte length + string
+      if (len === 0 || off + len > wire.length) return "";
+      let p = off;
+      const end = off + len;
+      const parts = [];
+      while (p < end) {
+        const slen = wire[p];
+        p += 1;
+        if (p + slen > end) {
+          parts.push(DECODE.decode(wire.subarray(p, end)));
+          break;
+        }
+        parts.push(DECODE.decode(wire.subarray(p, p + slen)));
+        p += slen;
+      }
+      return JSON.stringify(parts.join(""));
+    }
     case 15: {
-      // prefer rd (10-byte stub is enough for MX: 2 + target)
-      if (rd.length < 2) return "";
-      const pref = readU16(rd, 0);
-      const r = readName(rd, 2);
+      // MX: 2-byte preference + exchange (domain name)
+      if (len < 2 || off + 2 > wire.length) return "";
+      const pref = readU16(wire, off);
+      const r = readName(wire, off + 2);
       return `${pref} ${r.name}`;
     }
     case 6: {
       // SOA RDATA: MNAME RNAME SERIAL REFRESH RETRY EXPIRE MINIMUM
-      if (rd.length < 40) return "";
-      const mname = readName(rd, 0);
-      const rname = readName(rd, mname.end);
-      const ser = toU32(rd, rname.end);
-      const refresh = toU32(rd, rname.end + 4);
-      const retry2 = toU32(rd, rname.end + 8);
-      const expire = toU32(rd, rname.end + 12);
-      const mini = toU32(rd, rname.end + 16);
+      if (len < 22 || off + len > wire.length) return "";
+      const mname = readName(wire, off);
+      const rname = readName(wire, mname.end);
+      let p = rname.end;
+      if (p + 20 > off + len) return `${mname.name} ${rname.name}`;
+      const ser = toU32(wire, p);
+      const refresh = toU32(wire, p + 4);
+      const retry2 = toU32(wire, p + 8);
+      const expire = toU32(wire, p + 12);
+      const mini = toU32(wire, p + 16);
       return `${mname.name} ${rname.name} ${ser} ${refresh} ${retry2} ${expire} ${mini}`;
     }
     default:
-      return Array.from(rd)
-        .slice(0, Math.min(rd.length, 64))
+      return Array.from(wire.subarray(off, Math.min(off + len, off + 64)))
         .map((x) => x.toString(16).padStart(2, "0"))
         .join("");
   }
@@ -142,6 +165,7 @@ export function toJsonResponse(wire, qname, qtypeName) {
   const collect = (count) => {
     const arr = [];
     for (let i = 0; i < count; i++) {
+      if (p >= wire.length) break;
       const { name, end } = readName(wire, p);
       p = end;
       if (p + 10 > wire.length) break;
@@ -151,19 +175,15 @@ export function toJsonResponse(wire, qname, qtypeName) {
       const len = readU16(wire, p + 8);
       p += 10;
       if (p + len > wire.length) break;
-      const rd = Array.from(wire.subarray(p, p + len));
+      const rdataOffset = p;
       p += len;
       const typeName = TYPE_STR[t] || `TYPE${t}`;
       arr.push({
         name,
         type: typeName,
-        ...(t === 1 || t === 28 ? { TTL: ttl, data: rdataString(t, rd, p, len, readName) } : {}),
+        TTL: ttl,
+        data: rdataString(t, wire, rdataOffset, len),
       });
-      // non-address records still include TTL+data
-      if (t !== 1 && t !== 28) {
-        arr[arr.length - 1].TTL = ttl;
-        arr[arr.length - 1].data = rdataString(t, rd, p, len, readName);
-      }
     }
     return arr;
   };

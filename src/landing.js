@@ -605,6 +605,20 @@ kdig -d @${new URL(origin).hostname} +https=${config.path} linux.do A</code></pr
   </div>
 
   <script>
+    function escapeHtml(str) {
+      if (str === null || str === undefined) return '';
+      return String(str).replace(/[&<>"']/g, function(m) {
+        switch (m) {
+          case '&': return '&amp;';
+          case '<': return '&lt;';
+          case '>': return '&gt;';
+          case '"': return '&quot;';
+          case "'": return '&#39;';
+          default: return m;
+        }
+      });
+    }
+
     function setQuery(domain) {
       document.getElementById('domainInput').value = domain;
       runQuery();
@@ -619,39 +633,47 @@ kdig -d @${new URL(origin).hostname} +https=${config.path} linux.do A</code></pr
 
       btn.disabled = true;
       btn.innerText = '查询中...';
-      box.innerHTML = '正在发起 DoH 查询...';
+      box.textContent = '正在发起 DoH 查询...';
 
       const start = performance.now();
       try {
-        const resp = await fetch('${config.jsonPath}?name=' + encodeURIComponent(domain) + '&type=' + type);
+        const resp = await fetch('${config.jsonPath}?name=' + encodeURIComponent(domain) + '&type=' + encodeURIComponent(type));
         const data = await resp.json();
         const duration = Math.round(performance.now() - start);
 
         let html = '';
         html += '⏱️ 解析耗时: ' + duration + ' ms\\n';
-        html += '🎯 响应状态: ' + (data.Status === 0 ? '<span style="color:#10b981">NOERROR (成功)</span>' : '<span style="color:#ef4444">Status ' + data.Status + '</span>') + '\\n';
+        const statusNum = Number(data.Status);
+        html += '🎯 响应状态: ' + (statusNum === 0 ? '<span style="color:#10b981">NOERROR (成功)</span>' : '<span style="color:#ef4444">Status ' + statusNum + '</span>') + '\\n';
         html += '🔒 DNSSEC: ' + (data.AD ? '已验证 (AD=1)' : '未开启/普通 (AD=0)') + '\\n\\n';
 
-        if (data.Answer && data.Answer.length > 0) {
+        if (Array.isArray(data.Answer) && data.Answer.length > 0) {
           html += '📋 答案记录 (Answers):\\n';
           data.Answer.forEach(ans => {
-            html += '  • ' + ans.name + '  ' + ans.type + '  ' + ans.data + ' (TTL: ' + ans.TTL + 's)\\n';
+            const safeName = escapeHtml(ans.name);
+            const safeType = escapeHtml(ans.type);
+            const safeData = escapeHtml(ans.data);
+            const safeTtl = Number(ans.TTL) || 0;
+            html += '  • ' + safeName + '  ' + safeType + '  ' + safeData + ' (TTL: ' + safeTtl + 's)\\n';
           });
         } else {
           html += '⚠️ 未查询到对应记录。\\n';
         }
 
-        if (data.Authority && data.Authority.length > 0) {
+        if (Array.isArray(data.Authority) && data.Authority.length > 0) {
           html += '\\n🏛️ 权威记录 (Authority):\\n';
           data.Authority.forEach(auth => {
-            html += '  • ' + auth.name + '  ' + auth.type + '  ' + auth.data + '\\n';
+            const safeName = escapeHtml(auth.name);
+            const safeType = escapeHtml(auth.type);
+            const safeData = escapeHtml(auth.data);
+            html += '  • ' + safeName + '  ' + safeType + '  ' + safeData + '\\n';
           });
         }
 
         box.innerHTML = html;
         loadStats();
       } catch (err) {
-        box.innerHTML = '<span style="color:#ef4444">查询失败: ' + err.message + '</span>';
+        box.innerHTML = '<span style="color:#ef4444">查询失败: ' + escapeHtml(err.message) + '</span>';
       } finally {
         btn.disabled = false;
         btn.innerText = '查询';
@@ -692,7 +714,7 @@ kdig -d @${new URL(origin).hostname} +https=${config.path} linux.do A</code></pr
             document.getElementById('analyticsStatus').style.color = '#10b981';
             document.getElementById('uptimeWrap').style.display = 'none';
           } else {
-            noticeEl.innerHTML = '⚠️ <b>全球聚合未开启或未配置读取凭据</b>：' + (rawData.message || '回退展示当前本地 PoP 数据') + '。可至 Cloudflare 控制台激活 Analytics Engine。';
+            noticeEl.innerHTML = '⚠️ <b>全球聚合未开启或未配置读取凭据</b>：' + escapeHtml(rawData.message || '回退展示当前本地 PoP 数据') + '。可至 Cloudflare 控制台激活 Analytics Engine。';
             noticeEl.style.borderLeftColor = '#f59e0b';
             document.getElementById('analyticsStatus').innerText = '未激活全局读取 (展示本地)';
             document.getElementById('analyticsStatus').style.color = '#f59e0b';

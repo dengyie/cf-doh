@@ -381,7 +381,8 @@ async function handleRulesSync(request, url, env, config) {
       headers: { "Content-Type": "application/json" },
     });
   }
-  const secret = env.RULES_SYNC_SECRET || config.token;
+  // Dedicated sync secret only — never fall back to client DOH_TOKEN (prevents privilege escalation)
+  const secret = config.rulesSyncSecret || env.RULES_SYNC_SECRET;
   if (!secret) {
     return new Response(
       JSON.stringify({ error: "RULES_SYNC_SECRET is not configured on server" }),

@@ -12,7 +12,8 @@ var DEFAULT = {
   maxResponseBytes: 65535,
   maxTtlSeconds: 3600,
   cacheTtlSeconds: 300,
-  rulesRefreshMin: 15,
+  rulesUrl: "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/direct-list.txt",
+  rulesCacheMin: 15,
   dnssec: true,
   // 感知/透传 DNSSEC（上游置 AD 且客户端请求过 DO 才回 AD 位）
   blockAction: "nxdomain",
@@ -50,8 +51,9 @@ function readConfig(env) {
     maxTtlSeconds: parseUint(env.MAX_TTL_SECONDS, DEFAULT.maxTtlSeconds, 0, 86400),
     cacheTtlSeconds: parseUint(env.CACHE_TTL_SECONDS, DEFAULT.cacheTtlSeconds, 0, 86400),
     rulesUrl: asSingle(env.RULES_URL, DEFAULT.rulesUrl),
-    rulesCacheMin: parseUint(env.RULES_CACHE_MIN, DEFAULT.rulesMin, 1, 1440),
+    rulesCacheMin: parseUint(env.RULES_CACHE_MIN, DEFAULT.rulesCacheMin, 1, 1440),
     token: asSingle(env.DOH_TOKEN, ""),
+    rulesSyncSecret: asSingle(env.RULES_SYNC_SECRET, ""),
     pageUrl: asSingle(env.PAGE_URL, ""),
     dnssec: String(env.DNSSEC ?? "").trim() === "" ? DEFAULT.dnssec : String(env.DNSSEC).trim() !== "0" && String(env.DNSSEC).trim().toLowerCase() !== "false",
     blockAction: (() => {
@@ -468,44 +470,61 @@ function inFailureWindow() {
 }
 function parseRuleText(text) {
   const plain = [];
+  const plainSet = /* @__PURE__ */ new Set();
   const full = /* @__PURE__ */ new Set();
   const regexp = [];
   for (const raw of text.split("\n")) {
     const line = raw.trim();
     if (!line || line.startsWith("#") || line.startsWith("//")) continue;
     if (line.startsWith("full:")) {
-      const d = line.slice(5).trim();
+      const d = line.slice(5).trim().toLowerCase();
       if (d) full.add(d);
     } else if (line.startsWith("regexp:")) {
       const d = line.slice(7).trim();
       if (d) regexp.push(new RegExp(d, "i"));
     } else {
-      plain.push(line);
+      const d = line.toLowerCase();
+      plain.push(d);
+      plainSet.add(d);
     }
   }
   plain.sort();
-  return { plain, full, regexp, version: text.length };
+  return { plain, plainSet, full, regexp, version: text.length };
 }
 function matchesRules(qname, rules) {
   const q = qname.toLowerCase();
   if (matchesBuiltin(q)) return true;
   if (!rules) return false;
-  if (rules.full.has(q)) return true;
-  for (let i = 0; i < rules.plain.length; i += 1) {
-    const p = rules.plain[i];
-    if (q === p) return true;
-    if (q.endsWith(`.${p}`)) return true;
+  if (rules.full && rules.full.has(q)) return true;
+  if (rules.plainSet) {
+    if (rules.plainSet.has(q)) return true;
+    let dotIdx = q.indexOf(".");
+    while (dotIdx !== -1) {
+      const parent = q.slice(dotIdx + 1);
+      if (rules.plainSet.has(parent)) return true;
+      dotIdx = q.indexOf(".", dotIdx + 1);
+    }
+  } else if (rules.plain) {
+    for (let i = 0; i < rules.plain.length; i += 1) {
+      const p = rules.plain[i];
+      if (q === p || q.endsWith(`.${p}`)) return true;
+    }
   }
-  for (let i = 0; i < rules.regexp.length; i += 1) {
-    if (rules.regexp[i].test(q)) return true;
+  if (rules.regexp) {
+    for (let i = 0; i < rules.regexp.length; i += 1) {
+      if (rules.regexp[i].test(q)) return true;
+    }
   }
   return false;
 }
 var BUILTIN = new Set(BUILTIN_OVERRIDE.map((d) => d.toLowerCase()));
 function matchesBuiltin(q) {
   if (BUILTIN.has(q)) return true;
-  for (const d of BUILTIN) {
-    if (q.endsWith(`.${d}`)) return true;
+  let dotIdx = q.indexOf(".");
+  while (dotIdx !== -1) {
+    const parent = q.slice(dotIdx + 1);
+    if (BUILTIN.has(parent)) return true;
+    dotIdx = q.indexOf(".", dotIdx + 1);
   }
   return false;
 }
@@ -622,6 +641,7 @@ var live2 = null;
 var coldInflight2 = null;
 function parseRuleText2(text) {
   const plain = [];
+  const plainSet = /* @__PURE__ */ new Set();
   const full = /* @__PURE__ */ new Set();
   const regexp = [];
   for (const raw of text.split("\n")) {
@@ -632,22 +652,36 @@ function parseRuleText2(text) {
     } else if (line.startsWith("regexp:")) {
       regexp.push(new RegExp(line.slice(7).trim(), "i"));
     } else {
-      plain.push(line.toLowerCase());
+      const d = line.toLowerCase();
+      plain.push(d);
+      plainSet.add(d);
     }
   }
   plain.sort();
-  return { plain, full, regexp, version: text.length };
+  return { plain, plainSet, full, regexp, version: text.length };
 }
 function matches(qname, rule) {
   const q = qname.toLowerCase();
   if (!rule) return false;
-  if (rule.full.has(q)) return true;
-  for (let i = 0; i < rule.plain.length; i += 1) {
-    const p = rule.plain[i];
-    if (q === p || q.endsWith(`.${p}`)) return true;
+  if (rule.full && rule.full.has(q)) return true;
+  if (rule.plainSet) {
+    if (rule.plainSet.has(q)) return true;
+    let dotIdx = q.indexOf(".");
+    while (dotIdx !== -1) {
+      const parent = q.slice(dotIdx + 1);
+      if (rule.plainSet.has(parent)) return true;
+      dotIdx = q.indexOf(".", dotIdx + 1);
+    }
+  } else if (rule.plain) {
+    for (let i = 0; i < rule.plain.length; i += 1) {
+      const p = rule.plain[i];
+      if (q === p || q.endsWith(`.${p}`)) return true;
+    }
   }
-  for (let i = 0; i < rule.regexp.length; i += 1) {
-    if (rule.regexp[i].test(q)) return true;
+  if (rule.regexp) {
+    for (let i = 0; i < rule.regexp.length; i += 1) {
+      if (rule.regexp[i].test(q)) return true;
+    }
   }
   return false;
 }
@@ -776,43 +810,65 @@ function readName(b, o) {
   }
   return { name: out, end: jumped ? jumpTo : p };
 }
-function rdataString(type, rd, off, len, nameReader) {
+function rdataString(type, wire, off, len) {
   switch (type) {
-    case 1:
-      return rd.length >= 4 ? `${rd[0]}.${rd[1]}.${rd[2]}.${rd[3]}` : "";
+    case 1: {
+      if (len < 4 || off + 4 > wire.length) return "";
+      return `${wire[off]}.${wire[off + 1]}.${wire[off + 2]}.${wire[off + 3]}`;
+    }
     case 28: {
-      if (rd.length < 16) return "";
+      if (len < 16 || off + 16 > wire.length) return "";
       const h = [];
-      for (let i = 0; i < 8; i++) h.push((rd[i * 2] << 8 | rd[i * 2 + 1]).toString(16));
+      for (let i = 0; i < 8; i++) {
+        const idx = off + i * 2;
+        h.push((wire[idx] << 8 | wire[idx + 1]).toString(16));
+      }
       return h.join(":");
     }
     case 5:
     case 2:
     case 12: {
-      const r = readName(rd, 0);
+      const r = readName(wire, off);
       return r.name;
     }
-    case 16:
-      return rd.length ? JSON.stringify(DECODE.decode(rd)) : "";
+    case 16: {
+      if (len === 0 || off + len > wire.length) return "";
+      let p = off;
+      const end = off + len;
+      const parts = [];
+      while (p < end) {
+        const slen = wire[p];
+        p += 1;
+        if (p + slen > end) {
+          parts.push(DECODE.decode(wire.subarray(p, end)));
+          break;
+        }
+        parts.push(DECODE.decode(wire.subarray(p, p + slen)));
+        p += slen;
+      }
+      return JSON.stringify(parts.join(""));
+    }
     case 15: {
-      if (rd.length < 2) return "";
-      const pref = readU162(rd, 0);
-      const r = readName(rd, 2);
+      if (len < 2 || off + 2 > wire.length) return "";
+      const pref = readU162(wire, off);
+      const r = readName(wire, off + 2);
       return `${pref} ${r.name}`;
     }
     case 6: {
-      if (rd.length < 40) return "";
-      const mname = readName(rd, 0);
-      const rname = readName(rd, mname.end);
-      const ser = toU32(rd, rname.end);
-      const refresh = toU32(rd, rname.end + 4);
-      const retry2 = toU32(rd, rname.end + 8);
-      const expire = toU32(rd, rname.end + 12);
-      const mini = toU32(rd, rname.end + 16);
+      if (len < 22 || off + len > wire.length) return "";
+      const mname = readName(wire, off);
+      const rname = readName(wire, mname.end);
+      let p = rname.end;
+      if (p + 20 > off + len) return `${mname.name} ${rname.name}`;
+      const ser = toU32(wire, p);
+      const refresh = toU32(wire, p + 4);
+      const retry2 = toU32(wire, p + 8);
+      const expire = toU32(wire, p + 12);
+      const mini = toU32(wire, p + 16);
       return `${mname.name} ${rname.name} ${ser} ${refresh} ${retry2} ${expire} ${mini}`;
     }
     default:
-      return Array.from(rd).slice(0, Math.min(rd.length, 64)).map((x) => x.toString(16).padStart(2, "0")).join("");
+      return Array.from(wire.subarray(off, Math.min(off + len, off + 64))).map((x) => x.toString(16).padStart(2, "0")).join("");
   }
 }
 function toJsonResponse(wire, qname, qtypeName) {
@@ -841,6 +897,7 @@ function toJsonResponse(wire, qname, qtypeName) {
   const collect = (count) => {
     const arr = [];
     for (let i = 0; i < count; i++) {
+      if (p >= wire.length) break;
       const { name, end } = readName(wire, p);
       p = end;
       if (p + 10 > wire.length) break;
@@ -850,18 +907,15 @@ function toJsonResponse(wire, qname, qtypeName) {
       const len = readU162(wire, p + 8);
       p += 10;
       if (p + len > wire.length) break;
-      const rd2 = Array.from(wire.subarray(p, p + len));
+      const rdataOffset = p;
       p += len;
       const typeName = TYPE_STR[t] || `TYPE${t}`;
       arr.push({
         name,
         type: typeName,
-        ...t === 1 || t === 28 ? { TTL: ttl, data: rdataString(t, rd2, p, len, readName) } : {}
+        TTL: ttl,
+        data: rdataString(t, wire, rdataOffset, len)
       });
-      if (t !== 1 && t !== 28) {
-        arr[arr.length - 1].TTL = ttl;
-        arr[arr.length - 1].data = rdataString(t, rd2, p, len, readName);
-      }
     }
     return arr;
   };
@@ -895,8 +949,13 @@ function jsonResponse(obj, minTtlSeconds = 0) {
 }
 
 // src/resolver.js
-async function queryUpstream(url, query, { timeoutMs, maxResponseBytes }) {
+async function queryUpstream(url, query, { timeoutMs, maxResponseBytes, signal }) {
   const controller = new AbortController();
+  const onParentAbort = () => controller.abort();
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener("abort", onParentAbort, { once: true });
+  }
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const start = performance.now();
   try {
@@ -924,6 +983,7 @@ async function queryUpstream(url, query, { timeoutMs, maxResponseBytes }) {
     return { ok: false, reason: controller.signal.aborted ? "timeout" : "network", durationMs };
   } finally {
     clearTimeout(timer);
+    if (signal) signal.removeEventListener("abort", onParentAbort);
   }
 }
 function classify(r) {
@@ -938,11 +998,12 @@ function classify(r) {
   return r.reason === "timeout" ? "timeout" : "error";
 }
 async function raceGroup(urls, query, parsedInfo, { timeoutMs, maxResponseBytes, on }) {
+  const groupController = new AbortController();
   const settle = (r) => {
     if (on) on({ kind: classify(r), url: r.url, durationMs: r.durationMs ?? 0 });
   };
   const pending = urls.map(async (url) => {
-    const res = await queryUpstream(url, query, { timeoutMs, maxResponseBytes });
+    const res = await queryUpstream(url, query, { timeoutMs, maxResponseBytes, signal: groupController.signal });
     return { url, ...res };
   });
   const results = new Array(pending.length);
@@ -958,6 +1019,7 @@ async function raceGroup(urls, query, parsedInfo, { timeoutMs, maxResponseBytes,
             try {
               const flags = validateUpstreamResponse(r.body, parsedInfo ?? null);
               if ((flags & 15) !== 2) {
+                groupController.abort();
                 resolve({ answer: r.body, from: r.url, durationMs: r.durationMs ?? 0 });
                 return;
               }
@@ -1988,6 +2050,20 @@ kdig -d @${new URL(origin).hostname} +https=${config.path} linux.do A</code></pr
   </div>
 
   <script>
+    function escapeHtml(str) {
+      if (str === null || str === undefined) return '';
+      return String(str).replace(/[&<>"']/g, function(m) {
+        switch (m) {
+          case '&': return '&amp;';
+          case '<': return '&lt;';
+          case '>': return '&gt;';
+          case '"': return '&quot;';
+          case "'": return '&#39;';
+          default: return m;
+        }
+      });
+    }
+
     function setQuery(domain) {
       document.getElementById('domainInput').value = domain;
       runQuery();
@@ -2002,39 +2078,47 @@ kdig -d @${new URL(origin).hostname} +https=${config.path} linux.do A</code></pr
 
       btn.disabled = true;
       btn.innerText = '\u67E5\u8BE2\u4E2D...';
-      box.innerHTML = '\u6B63\u5728\u53D1\u8D77 DoH \u67E5\u8BE2...';
+      box.textContent = '\u6B63\u5728\u53D1\u8D77 DoH \u67E5\u8BE2...';
 
       const start = performance.now();
       try {
-        const resp = await fetch('${config.jsonPath}?name=' + encodeURIComponent(domain) + '&type=' + type);
+        const resp = await fetch('${config.jsonPath}?name=' + encodeURIComponent(domain) + '&type=' + encodeURIComponent(type));
         const data = await resp.json();
         const duration = Math.round(performance.now() - start);
 
         let html = '';
         html += '\u23F1\uFE0F \u89E3\u6790\u8017\u65F6: ' + duration + ' ms\\n';
-        html += '\u{1F3AF} \u54CD\u5E94\u72B6\u6001: ' + (data.Status === 0 ? '<span style="color:#10b981">NOERROR (\u6210\u529F)</span>' : '<span style="color:#ef4444">Status ' + data.Status + '</span>') + '\\n';
+        const statusNum = Number(data.Status);
+        html += '\u{1F3AF} \u54CD\u5E94\u72B6\u6001: ' + (statusNum === 0 ? '<span style="color:#10b981">NOERROR (\u6210\u529F)</span>' : '<span style="color:#ef4444">Status ' + statusNum + '</span>') + '\\n';
         html += '\u{1F512} DNSSEC: ' + (data.AD ? '\u5DF2\u9A8C\u8BC1 (AD=1)' : '\u672A\u5F00\u542F/\u666E\u901A (AD=0)') + '\\n\\n';
 
-        if (data.Answer && data.Answer.length > 0) {
+        if (Array.isArray(data.Answer) && data.Answer.length > 0) {
           html += '\u{1F4CB} \u7B54\u6848\u8BB0\u5F55 (Answers):\\n';
           data.Answer.forEach(ans => {
-            html += '  \u2022 ' + ans.name + '  ' + ans.type + '  ' + ans.data + ' (TTL: ' + ans.TTL + 's)\\n';
+            const safeName = escapeHtml(ans.name);
+            const safeType = escapeHtml(ans.type);
+            const safeData = escapeHtml(ans.data);
+            const safeTtl = Number(ans.TTL) || 0;
+            html += '  \u2022 ' + safeName + '  ' + safeType + '  ' + safeData + ' (TTL: ' + safeTtl + 's)\\n';
           });
         } else {
           html += '\u26A0\uFE0F \u672A\u67E5\u8BE2\u5230\u5BF9\u5E94\u8BB0\u5F55\u3002\\n';
         }
 
-        if (data.Authority && data.Authority.length > 0) {
+        if (Array.isArray(data.Authority) && data.Authority.length > 0) {
           html += '\\n\u{1F3DB}\uFE0F \u6743\u5A01\u8BB0\u5F55 (Authority):\\n';
           data.Authority.forEach(auth => {
-            html += '  \u2022 ' + auth.name + '  ' + auth.type + '  ' + auth.data + '\\n';
+            const safeName = escapeHtml(auth.name);
+            const safeType = escapeHtml(auth.type);
+            const safeData = escapeHtml(auth.data);
+            html += '  \u2022 ' + safeName + '  ' + safeType + '  ' + safeData + '\\n';
           });
         }
 
         box.innerHTML = html;
         loadStats();
       } catch (err) {
-        box.innerHTML = '<span style="color:#ef4444">\u67E5\u8BE2\u5931\u8D25: ' + err.message + '</span>';
+        box.innerHTML = '<span style="color:#ef4444">\u67E5\u8BE2\u5931\u8D25: ' + escapeHtml(err.message) + '</span>';
       } finally {
         btn.disabled = false;
         btn.innerText = '\u67E5\u8BE2';
@@ -2075,7 +2159,7 @@ kdig -d @${new URL(origin).hostname} +https=${config.path} linux.do A</code></pr
             document.getElementById('analyticsStatus').style.color = '#10b981';
             document.getElementById('uptimeWrap').style.display = 'none';
           } else {
-            noticeEl.innerHTML = '\u26A0\uFE0F <b>\u5168\u7403\u805A\u5408\u672A\u5F00\u542F\u6216\u672A\u914D\u7F6E\u8BFB\u53D6\u51ED\u636E</b>\uFF1A' + (rawData.message || '\u56DE\u9000\u5C55\u793A\u5F53\u524D\u672C\u5730 PoP \u6570\u636E') + '\u3002\u53EF\u81F3 Cloudflare \u63A7\u5236\u53F0\u6FC0\u6D3B Analytics Engine\u3002';
+            noticeEl.innerHTML = '\u26A0\uFE0F <b>\u5168\u7403\u805A\u5408\u672A\u5F00\u542F\u6216\u672A\u914D\u7F6E\u8BFB\u53D6\u51ED\u636E</b>\uFF1A' + escapeHtml(rawData.message || '\u56DE\u9000\u5C55\u793A\u5F53\u524D\u672C\u5730 PoP \u6570\u636E') + '\u3002\u53EF\u81F3 Cloudflare \u63A7\u5236\u53F0\u6FC0\u6D3B Analytics Engine\u3002';
             noticeEl.style.borderLeftColor = '#f59e0b';
             document.getElementById('analyticsStatus').innerText = '\u672A\u6FC0\u6D3B\u5168\u5C40\u8BFB\u53D6 (\u5C55\u793A\u672C\u5730)';
             document.getElementById('analyticsStatus').style.color = '#f59e0b';
@@ -2448,7 +2532,7 @@ async function handleRulesSync(request, url, env, config) {
       headers: { "Content-Type": "application/json" }
     });
   }
-  const secret = env.RULES_SYNC_SECRET || config.token;
+  const secret = config.rulesSyncSecret || env.RULES_SYNC_SECRET;
   if (!secret) {
     return new Response(
       JSON.stringify({ error: "RULES_SYNC_SECRET is not configured on server" }),

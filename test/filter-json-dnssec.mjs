@@ -54,7 +54,9 @@ globalThis.fetch = async (url, init) => {
 
   // Build a NEW, clean answer: header(12) + question qname + 4 + answer RR.
   const nameBytes = body.subarray(12, nameEnd);
-  const ans = new Uint8Array(12 + nameBytes.length + 4 + 2 + 10 + 4);
+  const isCname = qt === 5;
+  const rdlength = isCname ? 2 : 4;
+  const ans = new Uint8Array(12 + nameBytes.length + 4 + 2 + 10 + rdlength);
   ans[0] = body[0];
   ans[1] = body[1]; // echo ID
   ans[2] = 0x85; // QR + RD + AD (AD=1 to exercise the DNSSEC mask)
@@ -68,11 +70,16 @@ globalThis.fetch = async (url, init) => {
   ans[o + 2] = (qc >> 8) & 0xff; ans[o + 3] = qc & 0xff;
   o += 4;
   ans[o] = 0xc0; ans[o + 1] = 0x0c; o += 2; // name -> offset 12
-  ans[o] = 0; ans[o + 1] = 1; o += 2; // type A
+  ans[o] = (qt >> 8) & 0xff; ans[o + 1] = qt & 0xff; o += 2; // type
   ans[o] = 0; ans[o + 1] = 1; o += 2; // class IN
   ans[o] = 0; ans[o + 1] = 0; ans[o + 2] = 0; ans[o + 3] = 60; o += 4; // ttl
-  ans[o] = 0; ans[o + 1] = 4; o += 2; // rdlength
-  ans[o] = 1; ans[o + 1] = 2; ans[o + 2] = 3; ans[o + 3] = 4; o += 4; // 1.2.3.4
+  ans[o] = (rdlength >> 8) & 0xff; ans[o + 1] = rdlength & 0xff; o += 2; // rdlength
+  if (isCname) {
+    // CNAME pointer back to offset 12 (the question name, e.g. example.com)
+    ans[o] = 0xc0; ans[o + 1] = 0x0c; o += 2;
+  } else {
+    ans[o] = 1; ans[o + 1] = 2; ans[o + 2] = 3; ans[o + 3] = 4; o += 4; // 1.2.3.4
+  }
   return new Response(ans, { headers: { "content-type": "application/dns-message" } });
 };
 
@@ -173,6 +180,21 @@ function req(qname, env) {
   check(json.Answer[0].data === "1.2.3.4", "JSON API A record data parsed");
   check(json.Answer[0].TTL === 60, "JSON API A record TTL parsed");
   check(upstreamCalls >= 1, "JSON API performed an upstream lookup");
+
+  // CNAME with compression pointer (0xc00c pointing to question name).
+  upstreamCalls = 0;
+  const respCname = await mod.handleRequest(
+    new Request("https://doh.test/json?name=alias.example.com&type=CNAME", {
+      headers: { "cf-connecting-ip": "1.2.3.4" },
+    }),
+    env
+  );
+  check(respCname.status === 200, "JSON API CNAME returns 200");
+  const jsonCname = await respCname.json();
+  check(jsonCname.Status === 0, "JSON API CNAME Status = NOERROR");
+  check(Array.isArray(jsonCname.Answer) && jsonCname.Answer.length === 1, "JSON API has 1 CNAME answer");
+  check(jsonCname.Answer[0].type === "CNAME", "JSON API answer type is CNAME");
+  check(jsonCname.Answer[0].data === "alias.example.com", "JSON API CNAME compressed pointer resolved correctly");
 
   // Unknown type string -> defaults to A.
   upstreamCalls = 0;

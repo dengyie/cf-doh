@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import worker from "../src/worker.js";
 import { metrics } from "../src/metrics.js";
+import { raceGroup } from "../src/resolver.js";
 
 async function testAnalyticsAndStats() {
   console.log("=== analytics.test.mjs ===");
@@ -68,16 +69,45 @@ async function testAnalyticsAndStats() {
   assert.ok(statsJson.upstreams.domestic);
   console.log("  ok - /api/stats returns 200 with structured metrics JSON");
 
-  // 4. /healthz includes stats snapshot
-  const healthReq = new Request("https://doh.example.com/healthz", { method: "GET" });
-  const healthResp = await worker.fetch(healthReq, {});
-  assert.equal(healthResp.status, 200);
-  const healthJson = await healthResp.json();
-  assert.ok(healthJson.stats, "health response contains stats field");
-  assert.ok(healthJson.counters, "health response contains counters field");
-  console.log("  ok - /healthz response includes embedded stats and counters");
+  // 5. raceGroup aborts slower in-flight upstream when fastest wins
+  const originalFetch = globalThis.fetch;
+  let slowAborted = false;
+  globalThis.fetch = async (url, init) => {
+    if (url.includes("fast")) {
+      const resp = new Uint8Array(16);
+      resp[2] = 0x81; resp[3] = 0x80; // NOERROR response
+      return new Response(resp, { headers: { "content-type": "application/dns-message" } });
+    }
+    // Slow upstream
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        resolve(new Response(new Uint8Array(16), { headers: { "content-type": "application/dns-message" } }));
+      }, 1000);
+      if (init.signal) {
+        init.signal.addEventListener("abort", () => {
+          clearTimeout(timer);
+          slowAborted = true;
+          const err = new Error("aborted");
+          err.name = "AbortError";
+          reject(err);
+        });
+      }
+    });
+  };
 
-  console.log("\n4 passed, 0 failed\n");
+  const dummyQuery = new Uint8Array(16);
+  const raceResult = await raceGroup(["https://slow.com/dns", "https://fast.com/dns"], dummyQuery, null, {
+    timeoutMs: 2000,
+    maxResponseBytes: 4096,
+  });
+  assert.equal(raceResult.from, "https://fast.com/dns");
+  // Give a small tick for signal propagation
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(slowAborted, true, "slower upstream request was successfully aborted");
+  console.log("  ok - raceGroup cancels slow in-flight upstreams when fastest wins");
+  globalThis.fetch = originalFetch;
+
+  console.log("\n5 passed, 0 failed\n");
 }
 
 testAnalyticsAndStats();

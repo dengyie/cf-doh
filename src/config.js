@@ -18,7 +18,8 @@ const DEFAULT = {
   maxResponseBytes: 65535,
   maxTtlSeconds: 3600,
   cacheTtlSeconds: 300,
-  rulesRefreshMin: 15,
+  rulesUrl: "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/direct-list.txt",
+  rulesCacheMin: 15,
   dnssec: true,        // 感知/透传 DNSSEC（上游置 AD 且客户端请求过 DO 才回 AD 位）
   blockAction: "nxdomain", // 过滤命中响应: nxdomain|zero(null 0.0.0.0/::)|passthrough
   jsonPath: "/json", // 兼容 Google 风格的 DoH JSON API（GET ?name=&type=）
@@ -56,8 +57,9 @@ export function readConfig(env) {
     maxTtlSeconds: parseUint(env.MAX_TTL_SECONDS, DEFAULT.maxTtlSeconds, 0, 86400),
     cacheTtlSeconds: parseUint(env.CACHE_TTL_SECONDS, DEFAULT.cacheTtlSeconds, 0, 86400),
     rulesUrl: asSingle(env.RULES_URL, DEFAULT.rulesUrl),
-    rulesCacheMin: parseUint(env.RULES_CACHE_MIN, DEFAULT.rulesMin, 1, 1440),
+    rulesCacheMin: parseUint(env.RULES_CACHE_MIN, DEFAULT.rulesCacheMin, 1, 1440),
     token: asSingle(env.DOH_TOKEN, ""),
+    rulesSyncSecret: asSingle(env.RULES_SYNC_SECRET, ""),
     pageUrl: asSingle(env.PAGE_URL, ""),
     dnssec: String(env.DNSSEC ?? "").trim() === "" ? DEFAULT.dnssec : String(env.DNSSEC).trim() !== "0" && String(env.DNSSEC).trim().toLowerCase() !== "false",
     blockAction: (() => {
