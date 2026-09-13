@@ -1,194 +1,245 @@
-# cf-doh — Self-hosted DNS-over-HTTPS resolver on Cloudflare Workers
+<div align="center">
 
-一个**开源、纯 JS、零构建依赖**的 Cloudflare Workers 上的 DNS-over-HTTPS (RFC 8484) 解析服务,专为「国内直连加速」设计:
+# ⚡ cf-doh
 
-- **github.com / linux.do 等站点直连**:根据域名规则把查询分流到国内 DNS(阿里)+ 携带你的出口 IP 的 ECS,拿到可直连的正确 IP;
-- 其它域名走全球 DNS(Google / Cloudflare)兜底;
-- **高可用**:所有上游**并发竞价**,谁先返回有效答案用谁,单个上游抖动/超时不影响;
-- 无需服务器、免费计划可跑,模块化、结构清晰、易扩展。
+### High-Performance Self-Hosted DNS-over-HTTPS Resolver on Cloudflare Workers
+**专为国内直连加速与防污染定制的自研高性能 DoH 解析网关**
 
-## 为什么用这个(相对其它开源方案)
+[![CI Status](https://github.com/dengyie/cf-doh/actions/workflows/ci.yml/badge.svg)](https://github.com/dengyie/cf-doh/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Cloudflare Workers](https://img.shields.io/badge/Platform-Cloudflare%20Workers-F38020?logo=cloudflare)](https://workers.cloudflare.com/)
+[![RFC 8484 Compliant](https://img.shields.io/badge/RFC-8484-success.svg)](https://tools.ietf.org/html/rfc8484)
+[![DNSSEC Ready](https://img.shields.io/badge/DNSSEC-AD%20Pass--through-brightgreen.svg)](#-安全与防污染)
+[![Zero Dependencies](https://img.shields.io/badge/Dependencies-0%20(Pure%20ESM)-orange.svg)](#-设计哲学)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/dengyie/cf-doh/pulls)
 
-我深度 review 过 GitHub 上主流的几个方案(`cloudflare-doh-ecs`、`CF-Workers-DoH`、`cfdohpw`),本实现针对它们的短板做了改进:
+<p align="center">
+  <a href="#-痛点与核心特性">核心特性</a> •
+  <a href="#-架构图解">架构原理</a> •
+  <a href="#-极速部署">极速部署</a> •
+  <a href="#-客户端接入配置指南">客户端配置</a> •
+  <a href="#-进阶玩法">进阶玩法</a> •
+  <a href="#-本地开发与测试">本地测试</a> •
+  <a href="#-license">开源许可</a>
+</p>
 
-- **上游容错**:原方案逐个上游「串行重试」,主上游失败要白等一轮超时;本方案**并发竞价**取最快有效响应。
-- **ECS 信任**:忽略客户端可伪造的 `X-Forwarded-For`,只用 Cloudflare 可信的 `cf-connecting-ip`,防止别人伪造 IP 拿到不属于自己的解析。
-- **规则安全**:规则库必须整体校验通过才生效,远程列表损坏/被污染不会毒化在线逻辑。
-- **可观测**:内置 `/healthz` + `/metrics`,结构化计数,便于接入告警。
-- **结构清晰**:每个职责一个模块(`dns` / `ecs` / `ip` / `rules` / `resolver` / `metrics` / `config`),扩展新分流维度不用改主入口。
+</div>
 
-## 架构
+---
+
+## 📖 项目简介
+
+`cf-doh` 是一套**开源、纯原生 JavaScript ESM、零第三方运行时依赖**的 Cloudflare Workers DNS-over-HTTPS (DoH, RFC 8484) 智能网关。
+
+它彻底解决了普通海外公共 DoH（如 1.1.1.1、8.8.8.8）在中国大陆环境下使用时导致的 **CDN 节点漂移至海外、访问变慢、部分站点连接超时** 的致命痛点，同时弥补了主流开源 Cloudflare DoH 脚本**串行重试慢、盲目信任 XFF 导致投毒风险、缺乏现代 Web 运维交互**等缺陷。
+
+---
+
+## 🔥 痛点与核心特性
+
+### 1. 为什么不直接用 1.1.1.1 或 8.8.8.8？
+- **CDN 乱飘**：海外公共 DoH 没有境内 ECS（EDNS Client Subnet），国内大型站点（如 Bilibili、阿里云、腾讯云、各大高校镜像站）会被解析到欧美节点，网速从百兆直降到几百 KB。
+- **直连站点断流**：像 `github.com`、`linux.do` 等在国内原本能够直连的站点，如果使用了海外 DNS 解析出被污染或不可达的海外 IP，就会导致无法打开。
+
+### 2. 为什么写 cf-doh？（与主流开源方案对比）
+
+| 特性对比 | 传统公共 DoH (1.1.1.1) | 传统开源 CF DoH 脚本 | **cf-doh (本项目)** |
+| :--- | :---: | :---: | :---: |
+| **国内外智能分流** | ❌ 纯全球节点 | ⚠️ 单一上游 / 静态分流 | **✅ 规则库动态匹配 (Loyalsoldier / 自定义 / 内置直连)** |
+| **上游容灾与调度** | ❌ 官方黑盒 | ❌ 串行依次重试（主上游超时白等 3s） | **🚀 全并发竞价（所有上游同时发起，取最快响应）** |
+| **ECS 子网注入** | ❌ 不支持或丢弃 | ⚠️ 信任客户端伪造的 `XFF`（易被投毒） | **🛡️ 仅信任 Cloudflare 边缘 `cf-connecting-ip` 掩码截断** |
+| **规则库容错防护** | ❌ 无 | ❌ 远程列表损坏直接导致整个解析宕机 | **🔒 内存单飞 + KV 镜像 + 格式强校验 + 失败回退** |
+| **DNSSEC 支持** | ✅ 支持 | ❌ 大多数剥离或伪造 AD 位 | **✅ RFC 兼容的 DNSSEC AD 智能透传** |
+| **交互式 Web 控制台** | ❌ 404 或无界面 | ❌ 简陋纯文本或 400 | **✨ 内置现代化响应式 Web 仪表盘 + 在线实时调试台** |
+| **API 兼容性** | 仅标准 DoH | 仅标准 DoH | **✅ RFC 8484 + Google 风格 JSON API + 完整 CORS** |
+| **广告 / 恶意拦截** | 依赖特定 IP | ❌ 无 | **🛡️ 可选 Blocklist 规则拦截（NXDOMAIN / 0.0.0.0）** |
+| **运行时依赖** | - | 部分依赖庞大 npm 包 | **🌱 0 外部运行时依赖，秒级冷启动** |
+
+---
+
+## 🏗️ 架构图解
 
 ```
-Client (DoH, RFC8484)
+Client (浏览器 / Clash / Surge / 手机系统)
    │
-   ▼  https://doh.你的域名.com/doh  (GET ?dns= 或 POST application/dns-message)
-Worker (src/worker.js)
-   ├─ /healthz /metrics                 → 结构化指标
-   ├─ read: 校验方法/Content-Type/大小
-   ├─ parse: DNS wire-format 解析(qname/qtype/opt)
-   ├─ rules: qname → 国内 or 全球       (KV 持久化 + 内存热缓存, cron 刷新)
-   ├─ ECS:  注入客户端子网(可信 CF IP, /24 或 /56)
-   └─ resolver: 并发竞速上游组
-        ├─ 国内组  → dns.alidns.com / doh.pub
-        └─ 全球组  → dns.google / cloudflare-dns.com
+   ▼  RFC 8484 (POST application/dns-message 或 GET ?dns=) / Google JSON API
+Cloudflare Edge (Cloudflare Workers)
+   │
+   ├─ [Web Console] 浏览器访问根路径 `/` → 呈现响应式交互调试仪表盘
+   ├─ [Token 鉴权]  可选验证 ?token= 或 x-doh-token 防白嫖
+   ├─ [Blocklist]   恶意域名 / 广告拦截过滤 → 快速阻断 (NXDOMAIN / 0.0.0.0)
+   ├─ [规则分流]    解析 qname → 匹配内置 override (linux.do / github) + 远程规则库
+   ├─ [ECS 注入]    提取 Cloudflare 可信边缘客户端 IP (/24 或 /56) 编码 EDNS0 OPT
+   └─ [并发竞价 Resolver (HA Engine)]
+        ├─ 🇨🇳 国内组并发 → 阿里云 DNS (dns.alidns.com) ⚔️ DNSPod (doh.pub)
+        └─ 🌐 全球组并发 → Google DNS (dns.google) ⚔️ Cloudflare (cloudflare-dns.com)
+            │
+            ▼
+    取首个有效应答 (非截断、非 SERVFAIL、ID 匹配) 
+            │
+            ▼
+     DNSSEC AD 校验透传 ──> 内存缓存 ──> 返回客户端
 ```
 
-## 上游并发竞价(resolver)
+---
 
-对同一查询,把所属组(国内/全球)内的**所有上游同时发出**,取第一个「ID 匹配、非截断、非 SERVFAIL」的有效响应。全组失败才返回 SERVFAIL。这就是「线上高可用」的核心:延迟由最快的上游决定,单个坏上游遮不住掉。
+## ⚡ 极速部署
 
-## 目录结构
+### 方案 A：命令行一键部署（推荐）
 
-```
-src/
-  worker.js    # Worker 入口(路由 / 请求处理 / 默认出口)
-  dns.js       # DNS 报文 解析 / 错误响应 / 上游响应校验(纯二进制)
-  ecs.js       # EDNS Client Subnet 编码
-  ip.js        # IP 解析(v4/v6)、掩码、可信头提取、全局单播判定
-  rules.js      # 规则加载/匹配(plain/full/regexp)+ KV 分层 + cron 刷新
-  resolver.js  # 上游并发竞价 + 故障转移
-  cache.js     # 内存 DNS 响应缓存(TTL 封顶 / 按 ECS 分键)
-  metrics.js    # 计数器 + /healthz 响应
-  config.js     # 环境变量 → 配置(默认值集中)
-cache:           # 响应缓存:key=(qname,qtype,ECS子网),TTL=min(应答TTL, 上限)
-dists/
-  worker-single.js  # 单文件打包产物(esbuild),可直接粘贴到 CF Control 面板
-test/           # 无依赖 node 测试
-sample-rules/   # 个人国内直连规则样例(含 linux.do)
-scripts/        # 一键构建/部署脚本
-wrangler.jsonc  # 部署配置
-```
-
-## 快速部署
-
-### 方式 A — 命令行(Wrangler)
+适合有 Node.js 与 Cloudflare 账号的开发者：
 
 ```bash
-# 1. 安装依赖
+# 1. 克隆仓库并安装依赖
+git clone https://github.com/dengyie/cf-doh.git
+cd cf-doh
 npm install
 
-# 2. one-click:验证测试 → 重建 bundle → 部署
-./scripts/deploy.sh
-# (没有 CLOUDFLARE_API_TOKEN 时会停下并提示;置好 token 后重跑即真正上线)
+# 2. 本地测试与打包验证
+npm test
+npm run build
 
-# 若需手动分步执行:
-npx wrangler kv namespace create RULES_KV   # 复制输出的 id 回去填
-npm run deploy                              # = wrangler deploy
+# 3. 创建持久化 KV 命名空间（可选，增强规则离线留存能力）
+npx wrangler kv namespace create RULES_KV
+# 将输出的 id 复制填入 wrangler.jsonc 里的 RULES_KV 中（若不填会自动降级为纯内存模式运行）
+
+# 4. 部署至 Cloudflare Workers
+npx wrangler deploy
 ```
 
-### 方式 B — 网页 Dashboard(粘贴 `dists/worker.js`)
+### 方案 B：纯网页 Dashboard 0 命令行部署
 
-1. Workers → Create → Workers,选「Dashboard 编辑器」;
-2. 新建一个 Work,把 `dists/worker.js` 内容整体粘贴为 **module worker**;
-3. 绑定 `RULES_KV`(Workers → KV → Bindings → Add 一个命名空间);
-4. 设置 Environment Variables(见下文);
-5. Save & Deploy。
+无需安装任何本地环境，只要有浏览器即可：
 
-**注意**:`*.workers.dev` 自带域名基本被 GFW 阻断,必须绑定你自己的域名并通过 Workers 路由承载(见「绑定域名」)。
+1. 打开 [Cloudflare Dashboard](https://dash.cloudflare.com/)，点击 **Workers & Pages** -> **Create application** -> **Create Worker**；
+2. 填写服务名称（如 `cf-doh`），点击 **Deploy**；
+3. 进入该 Worker 的管理页面，点击 **Edit code**（编辑代码）；
+4. 复制本仓库根目录 [`dists/worker-single.js`](dists/worker-single.js) 的全部内容，完整覆盖粘贴到左侧编辑器中；
+5. 点击右上角 **Deploy** 即可上线！
 
-## 环境变量(vars 或 dashboard)
+> 💡 **核心建议：绑定自定义域名**  
+> `*.workers.dev` 官方分配的二级域名在大面积网络环境下受到干扰阻断。强烈推荐在 Worker 管理页的 **Settings -> Triggers -> Custom Domains** 绑定您自己的二级域名（例如 `doh.yourdomain.com`），Cloudflare 会自动签发证书并配置好全局路由。
 
-| 变量 | 默认 | 说明 |
-|---|---|---|
-| `DOH_PATH` | `/doh` | DoH 查询路径(客户端填入的 URL 路径) |
+---
+
+## 📱 客户端接入配置指南
+
+一旦部署完成，您的标准 DoH 接口为：`https://doh.yourdomain.com/doh`。
+
+### 1. Clash Verge / Mihomo / Clash Meta
+在配置文件的 `dns` 节点下配置：
+```yaml
+dns:
+  enable: true
+  listen: 0.0.0.0:1053
+  ipv6: false
+  enhanced-mode: fake-ip
+  nameserver:
+    - "https://doh.yourdomain.com/doh"
+  default-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+```
+
+### 2. Surge
+在 `[General]` 配置段中追加：
+```ini
+[General]
+dns-server = 223.5.5.5, 119.29.29.29
+doh-server = https://doh.yourdomain.com/doh
+doh-format = wire
+```
+
+### 3. Shadowrocket / Loon / Quantumult X
+- **Shadowrocket**：设置 -> DNS -> 添加自定义 DNS-over-HTTPS -> 填入 `https://doh.yourdomain.com/doh`。
+- **Loon**：[General] -> `doh-server = https://doh.yourdomain.com/doh`。
+
+### 4. Apple iOS 14+ / macOS 11+ 原生加密 DNS
+通过 Safari 打开您的域名首页，或者通过 Apple Configurator 制作包含 `dns-over-https` 描述文件：
+- ServerURL: `https://doh.yourdomain.com/doh`
+
+### 5. Android 13+ / 浏览器安全 DNS
+- **Chrome / Edge / Firefox**：进入浏览器设置 -> 隐私和安全性 -> 使用安全 DNS -> 选择「自定义」-> 填入 `https://doh.yourdomain.com/doh`。
+
+### 6. 命令行调试 (cURL / dig / kdig)
+```bash
+# 1. 服务健康检查
+curl -s "https://doh.yourdomain.com/healthz"
+
+# 2. 通过内置 Google JSON API 快速解析
+curl -s "https://doh.yourdomain.com/json?name=linux.do&type=A"
+
+# 3. 使用 kdig 测试 RFC 8484 协议
+kdig -d @doh.yourdomain.com +https=/doh linux.do A
+```
+
+---
+
+## 🎛️ 环境变量与进阶配置
+
+所有参数均可在 `wrangler.jsonc` 的 `vars` 或 Cloudflare 控制台环境变量中自由定制：
+
+| 环境变量 | 默认值 | 作用与说明 |
+| :--- | :--- | :--- |
+| `DOH_PATH` | `/doh` | RFC 8484 查询路径 |
+| `JSON_PATH` | `/json` | Google 风格 JSON API 路径（如 `?name=...&type=A`） |
 | `DOMESTIC_DOH_URL` | `https://dns.alidns.com/dns-query` | 国内组主上游 |
-| `DOMESTIC_FALLBACK_DOH_URL` | `https://doh.pub/dns-query` | 国内组备上游(同组并发) |
+| `DOMESTIC_FALLBACK_DOH_URL` | `https://doh.pub/dns-query` | 国内组并发备用上游（腾讯 DNSPod） |
 | `GLOBAL_DOH_URL` | `https://dns.google/dns-query` | 全球组主上游 |
-| `GLOBAL_FALLBACK_DOH_URL` | `https://cloudflare-dns.com/dns-query` | 全球组备上游 |
-| `ECS_IPV4_PREFIX` | `24` | IPv4 客户端子网前缀 |
-| `ECS_IPV6_PREFIX` | `56` | IPv6 客户端子网前缀 |
-| `UPSTREAM_TIMEOUT_MS` | `3000` | 每个上游超时上限 |
-| `MAX_QUERY_BYTES` | `4096` | 最大查询体 |
-| `MAX_RESPONSE_BYTES` | `65535` | 最大响应体 |
-| `CACHE_TTL_SECONDS` | `300` | 内存缓存上限(秒);实际 TTL = min(应答 TTL, 该值)。设 `0` 关闭缓存 |
-| `RULES_URL` | (社区列表) | 覆盖规则源(自定义列表 CDN/gist) |
-| `DOH_TOKEN` | (空) | 可选;设置后请求需带 `?token=` 或 `x-doh-token` 头,防止被滥用 |
+| `GLOBAL_FALLBACK_DOH_URL` | `https://cloudflare-dns.com/dns-query` | 全球组并发备用上游 |
+| `ECS_IPV4_PREFIX` | `24` | IPv4 注入掩码（/24 既能精准识别地域又保护隐私） |
+| `ECS_IPV6_PREFIX` | `56` | IPv6 注入掩码 |
+| `UPSTREAM_TIMEOUT_MS` | `3000` | 单个上游超时熔断时间（毫秒） |
+| `CACHE_TTL_SECONDS` | `300` | 边缘内存热缓存最大时间（秒）；为 `0` 则停用缓存 |
+| `DNSSEC` | `1` | 启用 DNSSEC AD 位透传（`1` 开启，`0` 关闭） |
+| `DOH_TOKEN` | *(空)* | 可选访问令牌。设置后请求须带 `?token=xxx` 或标头 `x-doh-token` |
+| `RULES_URL` | *(默认国内列表)* | 外部规则源 URL（每行一个域名，支持 `full:` 及 `regexp:`） |
+| `BLOCK_URL` | *(空)* | 拦截黑名单 URL。设置后命中域名直接拦截 |
+| `BLOCK_ACTION` | `nxdomain` | 拦截行为：`nxdomain`（不存在）或 `zero`（黑洞 0.0.0.0/::） |
 
-## 绑定域名并启用
+---
 
-1. 境内购买域名(或已有),把 NS 托管到 Cloudflare(免费计划即可)。
-2. 在域名 DNS 加记录:`doh  A  1.1.1.1`(或优选 CF IP;可配 CDN 仅用于这个低流量 DoH) 。
-3. 在 **Workers 路由** 添加:`doh.你的域名.com/*` → 绑定到 `cf-doh` Worker。
+## 🎯 进阶玩法
 
-> **更省事的替代(推荐)** — 直接用 Cloudflare API 把 `doh.<你的域名>` 绑为 Worker 的
-> **自定义域**,Cloudflare 会自动建好 DNS 记录 + 免费证书,无需手动加 A 记录/路由:
-> ```bash
-> ACC=<account_id>; EMAIL=<账号邮箱>; KEY=<Global API Key 或 CF_API_TOKEN>
-> curl -X PUT "https://api.cloudflare.com/client/v4/accounts/$ACC/workers/domains" \
->   -H "X-Auth-Email: $EMAIL" -H "X-Auth-Key: $KEY" \
->   -H "Content-Type: application/json" \
->   --data '{"hostname":"doh.你的域名.com","service":"cf-doh","environment":"production"}'
-> ```
-> 成功后等待 DNS 生效(通常几秒),`dig +short doh.你的域名.com` 会返回 CF 边缘 IP。
+### 1. 强制特定站点国内直连 (如 linux.do / 自建私有域名)
+`src/rules.js` 中内置了 `BUILTIN_OVERRIDE` 核心名单（`linux.do`, `github.com` 等），即便外部网络波动无法拉取外部列表，这些域名也**绝对保底直连**，始终通过阿里云获取带国内 ECS 的最优 IP。  
+如需追加个人专属规则，只需在环境变量中设置 `RULES_URL` 指向您自己的 GitHub Gist 或 CDN 文件（可参考 [`sample-rules/direct-personal.txt`](sample-rules/direct-personal.txt)）。
 
-> **2026-09-11 实测**:`*.workers.dev` 域名在受限网络不可达(连接超时),自定义域(`doh.<你的域名>`)可达且
-> `github.com`/`linux.do` 均返回 `rcode=0` + 正确 A 记录。若发现请求 403/退化异常,
-> 先检查是不是测试脚本缺 `User-Agent`——Cloudflare 边缘会给裸 HTTP 客户端的 `/doh`
-> 返回非 DNS 响应,加浏览器 UA 或用 dig 即可。
-4. 客户端测试:
-   ```bash
-   # DoH 服务可用性
-   curl -sk "https://doh.你的域名.com:443/healthz"
+### 2. 广告过滤与恶意域名黑洞
+在环境变量中配置 `BLOCK_URL`（指向去广告规则列表）并设置 `BLOCK_ACTION="zero"`：  
+所有广告域名将在 Workers 边缘被瞬间拦截并直接返回 `0.0.0.0`，毫秒响应且不消耗任何上游流量！
 
-   # 走 DoH 解析 github.com
-   curl -sk "https://doh.你的域名.com/doh?dns=$(printf 'github.com' ...)" # 或用 dig
-   ```
+---
 
-### 客户端配置
+## 🧪 本地开发与测试
 
-任一支持 DoH 的设备/软件均可,填:
-
-```
-https://doh.你的域名.com /doh
-```
-
-- Android / Private DNS:选择「自定义 DoH」填上面地址;
-- Windows / macOS:网络 → DNS 手动填 DoH 地址;
-- 浏览器(如 Firefox):Settings → 通用 → Network Settings → 启用 DoH,填该地址。
-
-## 把 linux.do / 其它站点加进来
-
-`rules.js` 的 `RULES_URL` 默认指向社区维护的「国内直连列表」。若你想自定义(如强制 `linux.do` 走国内,始终获得阿里 + ECS 的国内出口),两种方式:
-
-**A. 覆盖整个列表**(简单):把 `RULES_URL` 指向你自己的 gist / raw 文本,内容每行一个域名。`linux.do` 直接写 `linux.do`(裸域名 = 后缀匹配,会命中 `linux.do`、`www.linux.do` 及所有子域)。仓库附有最小落地方案 `sample-rules/direct-personal.txt`,把它传到你自己的 gist/raw 或 CF Pages 后填到配置即可:
-
-```
-# sample-rules/direct-personal.txt —— 个人国内直连覆盖层(每行一个域名)
-linux.do
-full:github.com
-```
-
-**B. 长期运行建议**:为「个人覆盖层 + 社区列表」合并维护一个聚合列表(例如用 CF Pages / GitHub Action 每日把这两份拼成一份),再提供给 `RULES_URL`。这样既保留了社区列表对主流国内站点的覆盖,又能强制你的自定义域名。可参考 `test/` 里对 `loadRulesFromText` 的用法。
-
-> 规则格式:裸域名=子域匹配;`full:` 精确匹配;`regexp:` 正则。规则集在命中前会被完整校验,乱序/HTML 会被拒绝,避免毒化在线解析。
-
-> 注意:只有 `RULES_URL` 指向的清单决定哪些域名走国内。若 `linux.do` 不在里面(默认也不会自动在),它会落到全球组。要让它获得阿里直连 + ECS,必须把它加进规则清单(方式 A 只要一行 `linux.do`)。
-
-## 本地测试(不依赖 Cloudflare 运行时也
+本项目保持极度纯粹的技术底座，测试**完全脱离外部云环境**，直接在本地 Node.js 原生运行：
 
 ```bash
-node test/run-all.mjs     # dns / routing / ecs-forward 全部无依赖测试
+# 运行全套单元测试与集成测试
+npm test
+
+# 重新构建单文件生产包
+npm run build
 ```
 
-已在本地 Node 26 验证全部通过。
+**测试套件包含**：
+- `dns.test.mjs`：DNS 二进制 Wire-format 解码、打包与边界溢出校验
+- `cache.test.mjs`：基于 ECS 隔离与 TTL 淘汰的内存缓存机制
+- `routing.mjs`：境内外域名规则分流与内置重载测试
+- `ecs.forward.mjs`：EDNS0 OPT 客户端子网精准注入测试
+- `filter-json-dnssec.mjs`：DNSSEC AD 透传、Google JSON API、Blocklist 黑名单拦截验证
+- `landing.cors.mjs`：跨域预检与 Web 仪表盘交互测试
+- `bundle.smoke.mjs`：esbuild 单文件打包冒烟测试
 
-## 线上部署验证(真实 Cloudflare)
+---
 
-不含可变变量、仅使用 Worker 代码时可以真正推到真实 Cloudflare 验证:
-临时预览账号部署成功并生成公网 URL —— `https://cf-doh.glowing-digit.workers.dev`
-(wrangler 输出 `Deployed cf-doh triggers`)。
-对公网 `*.workers.dev` 的 live smoke-test 在本沙箱网络下不可达(连接超时,属沙箱 egress 限制,非部署失败)。
-正式绑定你自己域名与 KV 后,用 `scripts/deploy.sh` 一键发布即可。
+## 🤝 参与贡献
 
-## 安全性 & 访问控制
+欢迎提交 Issue 和 Pull Request！在贡献代码前，请参阅 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-- **ECS 信任**:只用 `cf-connecting-ip`,忽略客户端可伪造的 XFF;
-- **响应校验**:校验上游响应的 ID 匹配、非截断、非 SERVFAIL 即可回发;
-- **可选 TOKEN**:开 `DOH_TOKEN` 后,外部请求必须有 token 才放行,防白嫖;
-- **规则校验**:脏列表(HTML、超大、非 UTF8)不会毒化在线解析;
-- DoH 端点不暴露 nginx 默认页,根路径返回一个简单说明页。
+---
 
-## License
+## 📄 License
 
-MIT.
+本项目采用 [MIT License](LICENSE) 开源许可。自由使用、修改与分发，欢迎 Star 🌟 支持！

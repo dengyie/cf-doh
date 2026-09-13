@@ -1037,6 +1037,582 @@ function createCache({ size = DEFAULT_SIZE, now = Date.now } = {}) {
   };
 }
 
+// src/landing.js
+function renderLandingHtml(origin, config) {
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>cf-doh \u2014 \u9AD8\u6027\u80FD\u81EA\u7814 Cloudflare Workers DoH \u89E3\u6790\u7F51\u5173</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>\u26A1</text></svg>">
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --card-bg: rgba(23, 32, 54, 0.7);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --text: #f3f4f6;
+      --text-muted: #9ca3af;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --accent: #10b981;
+      --accent-orange: #f59e0b;
+      --code-bg: #060911;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f8fafc;
+        --card-bg: rgba(255, 255, 255, 0.9);
+        --card-border: rgba(0, 0, 0, 0.08);
+        --text: #0f172a;
+        --text-muted: #64748b;
+        --primary: #2563eb;
+        --primary-hover: #1d4ed8;
+        --accent: #059669;
+        --accent-orange: #d97706;
+        --code-bg: #f1f5f9;
+      }
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      padding: 0;
+      overflow-x: hidden;
+    }
+    .container {
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 40px 20px 80px 20px;
+    }
+    header {
+      text-align: center;
+      margin-bottom: 48px;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px;
+      border-radius: 9999px;
+      font-size: 0.85rem;
+      font-weight: 500;
+      background: rgba(59, 130, 246, 0.15);
+      color: #60a5fa;
+      border: 1px solid rgba(59, 130, 246, 0.3);
+      margin-bottom: 16px;
+    }
+    h1 {
+      font-size: 2.75rem;
+      font-weight: 800;
+      letter-spacing: -0.025em;
+      margin-bottom: 12px;
+      background: linear-gradient(135deg, #60a5fa 0%, #3b82f6 50%, #93c5fd 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .subtitle {
+      font-size: 1.15rem;
+      color: var(--text-muted);
+      max-width: 680px;
+      margin: 0 auto 24px auto;
+    }
+    .tags {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 8px;
+    }
+    .tag {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 24px;
+      margin-bottom: 32px;
+    }
+    @media (min-width: 768px) {
+      .grid-2 { grid-template-columns: 1fr 1fr; }
+    }
+    .card {
+      background: var(--card-bg);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 24px;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1);
+    }
+    .card-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 1.25rem;
+      font-weight: 600;
+      margin-bottom: 16px;
+    }
+    .input-group {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+    input[type="text"] {
+      flex: 1;
+      padding: 10px 14px;
+      border-radius: 8px;
+      border: 1px solid var(--card-border);
+      background: var(--code-bg);
+      color: var(--text);
+      font-size: 0.95rem;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    input[type="text"]:focus {
+      border-color: var(--primary);
+    }
+    select {
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--card-border);
+      background: var(--code-bg);
+      color: var(--text);
+      font-size: 0.95rem;
+      outline: none;
+      cursor: pointer;
+    }
+    button.btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 10px 18px;
+      background: var(--primary);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 0.95rem;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    button.btn:hover { background: var(--primary-hover); transform: translateY(-1px); }
+    .quick-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 16px;
+    }
+    .chip {
+      background: var(--code-bg);
+      border: 1px solid var(--card-border);
+      padding: 3px 8px;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .chip:hover { color: var(--primary); border-color: var(--primary); }
+    .result-box {
+      background: var(--code-bg);
+      border-radius: 10px;
+      padding: 16px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.88rem;
+      border: 1px solid var(--card-border);
+      min-height: 120px;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .tabs {
+      display: flex;
+      gap: 6px;
+      border-bottom: 1px solid var(--card-border);
+      margin-bottom: 16px;
+      overflow-x: auto;
+      padding-bottom: 6px;
+    }
+    .tab-btn {
+      padding: 6px 14px;
+      border-radius: 6px;
+      font-size: 0.88rem;
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-weight: 500;
+      white-space: nowrap;
+    }
+    .tab-btn.active {
+      background: rgba(59, 130, 246, 0.15);
+      color: #60a5fa;
+      font-weight: 600;
+    }
+    .code-block {
+      position: relative;
+      background: var(--code-bg);
+      border-radius: 10px;
+      padding: 16px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.85rem;
+      border: 1px solid var(--card-border);
+      overflow-x: auto;
+    }
+    .copy-btn {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      background: rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: var(--text);
+      border-radius: 6px;
+      padding: 4px 8px;
+      font-size: 0.75rem;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .copy-btn:hover { background: rgba(255, 255, 255, 0.2); }
+    .feature-list {
+      list-style: none;
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+    }
+    @media (min-width: 640px) {
+      .feature-list { grid-template-columns: 1fr 1fr; }
+    }
+    .feature-item {
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+    }
+    .feature-icon {
+      font-size: 1.25rem;
+      background: rgba(59, 130, 246, 0.1);
+      padding: 8px;
+      border-radius: 8px;
+      line-height: 1;
+    }
+    .footer {
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      margin-top: 48px;
+      border-top: 1px solid var(--card-border);
+      padding-top: 24px;
+    }
+    .footer a {
+      color: var(--primary);
+      text-decoration: none;
+    }
+    .footer a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="badge">\u{1F680} Cloudflare Workers \u2022 RFC 8484 \u2022 \u7EAF\u81EA\u7814</div>
+      <h1>cf-doh \u89E3\u6790\u7F51\u5173</h1>
+      <p class="subtitle">\u4E13\u4E3A\u56FD\u5185\u76F4\u8FDE\u52A0\u901F\u5B9A\u5236\u7684\u81EA\u7814 DNS-over-HTTPS \u89E3\u6790\u670D\u52A1\u3002\u5185\u7F6E\u56FD\u5185\u5916\u667A\u80FD\u5206\u6D41\u3001\u771F\u5B9E\u53EF\u4FE1 ECS \u6CE8\u5165\u4E0E\u5168\u4E0A\u6E38\u5E76\u53D1\u7ADE\u901F\u3002</p>
+      <div class="tags">
+        <span class="tag">\u26A1 \u5E76\u53D1\u7ADE\u4EF7 (Zero Wait)</span>
+        <span class="tag">\u{1F6E1}\uFE0F \u53EF\u4FE1\u51FA\u53E3 ECS</span>
+        <span class="tag">\u{1F1E8}\u{1F1F3} \u963F\u91CC\u4E91 / \u817E\u8BAF\u4E91 \u76F4\u8FDE</span>
+        <span class="tag">\u{1F310} Google / CF \u5168\u7403\u515C\u5E95</span>
+        <span class="tag">\u{1F512} DNSSEC \u900F\u4F20</span>
+        <span class="tag">\u{1F4CA} JSON API \u517C\u5BB9</span>
+      </div>
+    </header>
+
+    <div class="grid grid-2">
+      <!-- \u5B9E\u65F6 DNS \u8C03\u8BD5\u5361\u7247 -->
+      <div class="card">
+        <div class="card-title">
+          <span>\u{1F9EA}</span>
+          <span>\u5728\u7EBF\u89E3\u6790\u6D4B\u8BD5\u53F0 (Live Playground)</span>
+        </div>
+        <p style="font-size:0.88rem; color:var(--text-muted); margin-bottom:12px;">
+          \u5B9E\u65F6\u6D4B\u8BD5\u57DF\u540D\u5728\u5F53\u524D\u8282\u70B9\u7684\u5206\u6D41\u7B56\u7565\u3001\u89E3\u6790 IP \u4E0E\u54CD\u5E94\u8017\u65F6\uFF1A
+        </p>
+        <div class="quick-chips">
+          <span class="chip" onclick="setQuery('linux.do')">linux.do (\u56FD\u5185\u7EC4)</span>
+          <span class="chip" onclick="setQuery('github.com')">github.com (\u56FD\u5185\u7EC4)</span>
+          <span class="chip" onclick="setQuery('bilibili.com')">bilibili.com (\u56FD\u5185\u7EC4)</span>
+          <span class="chip" onclick="setQuery('google.com')">google.com (\u5168\u7403\u7EC4)</span>
+          <span class="chip" onclick="setQuery('cloudflare.com')">cloudflare.com (\u5168\u7403\u7EC4)</span>
+        </div>
+        <div class="input-group">
+          <input type="text" id="domainInput" placeholder="\u8F93\u5165\u5F85\u89E3\u6790\u57DF\u540D (\u5982 linux.do)" value="linux.do">
+          <select id="typeSelect">
+            <option value="A">A</option>
+            <option value="AAAA">AAAA</option>
+            <option value="TXT">TXT</option>
+            <option value="HTTPS">HTTPS</option>
+          </select>
+          <button class="btn" id="queryBtn" onclick="runQuery()">\u67E5\u8BE2</button>
+        </div>
+        <div class="result-box" id="resultBox">\u70B9\u51FB\u300C\u67E5\u8BE2\u300D\u67E5\u770B\u771F\u5B9E\u89E3\u6790\u7ED3\u679C\u4E0E\u94FE\u8DEF\u65F6\u5EF6...</div>
+      </div>
+
+      <!-- \u7AEF\u70B9\u4FE1\u606F\u4E0E\u72B6\u6001\u5361\u7247 -->
+      <div class="card">
+        <div class="card-title">
+          <span>\u{1F4E1}</span>
+          <span>\u670D\u52A1\u63A5\u5165\u7AEF\u70B9</span>
+        </div>
+        <div style="margin-bottom: 16px;">
+          <div style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 4px;">RFC 8484 \u6807\u51C6 DoH URL</div>
+          <div class="code-block" style="padding: 10px 14px;">
+            <code>${origin}${config.path}</code>
+            <button class="copy-btn" onclick="copyText('${origin}${config.path}')">\u590D\u5236</button>
+          </div>
+        </div>
+        <div style="margin-bottom: 16px;">
+          <div style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 4px;">Google \u98CE\u683C JSON API \u7AEF\u70B9</div>
+          <div class="code-block" style="padding: 10px 14px;">
+            <code>${origin}${config.jsonPath}?name=linux.do&type=A</code>
+            <button class="copy-btn" onclick="copyText('${origin}${config.jsonPath}?name=linux.do&type=A')">\u590D\u5236</button>
+          </div>
+        </div>
+        <div style="margin-bottom: 16px;">
+          <div style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 4px;">\u5065\u5EB7\u68C0\u67E5\u4E0E\u7EDF\u8BA1\u6307\u6807</div>
+          <div class="code-block" style="padding: 10px 14px;">
+            <code>${origin}/healthz</code>
+            <button class="copy-btn" onclick="copyText('${origin}/healthz')">\u590D\u5236</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- \u5BA2\u6237\u7AEF\u4E00\u952E\u914D\u7F6E\u5361\u7247 -->
+    <div class="card" style="margin-bottom: 32px;">
+      <div class="card-title">
+        <span>\u2699\uFE0F</span>
+        <span>\u5168\u5E73\u53F0\u5BA2\u6237\u7AEF\u63A5\u5165\u6307\u5357</span>
+      </div>
+      <div class="tabs">
+        <button class="tab-btn active" onclick="switchTab('clash')">Clash / Mihomo</button>
+        <button class="tab-btn" onclick="switchTab('surge')">Surge</button>
+        <button class="tab-btn" onclick="switchTab('shadowrocket')">Shadowrocket</button>
+        <button class="tab-btn" onclick="switchTab('apple')">iOS / macOS</button>
+        <button class="tab-btn" onclick="switchTab('android')">Android / Windows</button>
+        <button class="tab-btn" onclick="switchTab('cli')">cURL / dig \u8C03\u8BD5</button>
+      </div>
+
+      <div id="tab-clash" class="tab-content">
+        <div class="code-block">
+          <button class="copy-btn" onclick="copyElement('code-clash')">\u590D\u5236\u4EE3\u7801</button>
+          <pre id="code-clash"><code>dns:
+  enable: true
+  listen: 0.0.0.0:1053
+  enhanced-mode: fake-ip
+  nameserver:
+    - "${origin}${config.path}"
+  default-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29</code></pre>
+        </div>
+      </div>
+
+      <div id="tab-surge" class="tab-content" style="display:none;">
+        <div class="code-block">
+          <button class="copy-btn" onclick="copyElement('code-surge')">\u590D\u5236\u4EE3\u7801</button>
+          <pre id="code-surge"><code>[General]
+dns-server = 223.5.5.5, 119.29.29.29
+doh-server = ${origin}${config.path}
+doh-format = wire</code></pre>
+        </div>
+      </div>
+
+      <div id="tab-shadowrocket" class="tab-content" style="display:none;">
+        <div class="code-block">
+          <button class="copy-btn" onclick="copyElement('code-shadowrocket')">\u590D\u5236\u4EE3\u7801</button>
+          <pre id="code-shadowrocket"><code># \u8FDB\u5165 Shadowrocket -> \u8BBE\u7F6E -> DNS -> \u542F\u7528 DNS-over-HTTPS
+DNS \u670D\u52A1\u5668 URL:
+${origin}${config.path}</code></pre>
+        </div>
+      </div>
+
+      <div id="tab-apple" class="tab-content" style="display:none;">
+        <div class="code-block">
+          <button class="copy-btn" onclick="copyElement('code-apple')">\u590D\u5236\u4EE3\u7801</button>
+          <pre id="code-apple"><code># iOS 14+ / macOS 11+ \u539F\u751F\u652F\u6301 DoH \u63CF\u8FF0\u6587\u4EF6 (.mobileconfig)
+# \u5BF9\u5E94 DoH \u670D\u52A1\u5668\u5730\u5740:
+${origin}${config.path}
+
+# \u53EF\u4EE5\u5728 Safari \u6253\u5F00\uFF0C\u6216\u4F7F\u7528 Apple Configurator \u751F\u6210\u63CF\u8FF0\u6587\u4EF6\u3002</code></pre>
+        </div>
+      </div>
+
+      <div id="tab-android" class="tab-content" style="display:none;">
+        <div class="code-block">
+          <button class="copy-btn" onclick="copyElement('code-android')">\u590D\u5236\u4EE3\u7801</button>
+          <pre id="code-android"><code># Android 13+ (Private DNS / \u73B0\u4EE3\u6D4F\u89C8\u5668\u8BBE\u7F6E)
+# Chrome / Edge: \u8BBE\u7F6E -> \u9690\u79C1\u548C\u5B89\u5168\u6027 -> \u4F7F\u7528\u5B89\u5168 DNS -> \u9009\u62E9\u63D0\u4F9B\u5546 -> \u81EA\u5B9A\u4E49:
+${origin}${config.path}
+
+# Windows 11: \u8BBE\u7F6E -> \u7F51\u7EDC\u548C Internet -> \u4EE5\u592A\u7F51/WLAN -> \u786C\u4EF6\u5C5E\u6027 -> DNS \u670D\u52A1\u5668\u5206\u914D:
+# \u9009\u62E9\u624B\u52A8 -> IPv4/IPv6 \u5F00 -> \u586B\u5199 DNS \u5E76\u5F00\u542F\u300C\u4EC5\u52A0\u5BC6 (\u901A\u8FC7 HTTPS \u7684 DNS)\u300D
+\u6A21\u677F URL: ${origin}${config.path}</code></pre>
+        </div>
+      </div>
+
+      <div id="tab-cli" class="tab-content" style="display:none;">
+        <div class="code-block">
+          <button class="copy-btn" onclick="copyElement('code-cli')">\u590D\u5236\u4EE3\u7801</button>
+          <pre id="code-cli"><code># 1. \u5FEB\u901F\u5065\u5EB7\u68C0\u67E5
+curl -s "${origin}/healthz"
+
+# 2. \u901A\u8FC7 JSON API \u5FEB\u901F\u89E3\u6790
+curl -s "${origin}${config.jsonPath}?name=linux.do&type=A"
+
+# 3. \u4F7F\u7528 kdig (knot-dnsutils) \u6D4B\u8BD5\u6807\u51C6 DoH
+kdig -d @${new URL(origin).hostname} +https=${config.path} linux.do A</code></pre>
+        </div>
+      </div>
+    </div>
+
+    <!-- \u6838\u5FC3\u4F18\u52BF -->
+    <div class="card">
+      <div class="card-title">
+        <span>\u{1F4A1}</span>
+        <span>\u4E3A\u4EC0\u4E48\u9009\u62E9 cf-doh\uFF1F</span>
+      </div>
+      <div class="feature-list">
+        <div class="feature-item">
+          <div class="feature-icon">\u{1F3CE}\uFE0F</div>
+          <div>
+            <strong>\u5168\u5E76\u53D1\u7ADE\u4EF7 (Zero Penalty)</strong>
+            <p style="font-size:0.85rem; color:var(--text-muted);">
+              \u56FD\u5185\u7EC4\u4E0E\u5168\u7403\u7EC4\u5185\u6240\u6709\u4E0A\u6E38\u540C\u65F6\u5E76\u53D1\u8BF7\u6C42\uFF0C\u5EF6\u8FDF\u53D6\u6700\u5C0F\u503C\u3002\u5F7B\u5E95\u7EC8\u7ED3\u4F20\u7EDF\u65B9\u6848\u4E32\u884C\u8D85\u65F6\u5361\u987F\u3002
+            </p>
+          </div>
+        </div>
+        <div class="feature-item">
+          <div class="feature-icon">\u{1F3AF}</div>
+          <div>
+            <strong>\u771F\u5B9E\u53EF\u4FE1 ECS \u6CE8\u5165</strong>
+            <p style="font-size:0.85rem; color:var(--text-muted);">
+              \u4E25\u683C\u4FE1\u4EFB Cloudflare \u8FB9\u7F18\u63D0\u53D6\u7684 client IP\uFF08/24 \u6216 /56\uFF09\uFF0C\u8FC7\u6EE4\u53EF\u4F2A\u9020\u7684 XFF\uFF0C\u8BA9 CDN \u8C03\u5EA6\u7CBE\u51C6\u9501\u5B9A\u6700\u8FD1\u8282\u70B9\u3002
+            </p>
+          </div>
+        </div>
+        <div class="feature-item">
+          <div class="feature-icon">\u{1F6E1}\uFE0F</div>
+          <div>
+            <strong>\u89C4\u5219\u9632\u6BD2\u5316\u4E0E\u786C\u9694\u79BB</strong>
+            <p style="font-size:0.85rem; color:var(--text-muted);">
+              \u5185\u7F6E linux.do / github.com \u7EDD\u5BF9\u76F4\u8FDE\u786C\u7F16\u7801\u9632\u62A4\uFF0C\u5916\u90E8\u89C4\u5219\u5931\u6548\u6216\u683C\u5F0F\u5F02\u5E38\u5E73\u6ED1\u56DE\u9000\uFF0C\u4FDD\u969C\u670D\u52A1\u6C38\u8FDC\u53EF\u7528\u3002
+            </p>
+          </div>
+        </div>
+        <div class="feature-item">
+          <div class="feature-icon">\u{1F4E6}</div>
+          <div>
+            <strong>\u96F6\u8FD0\u884C\u65F6\u4F9D\u8D56 & \u5F00\u7BB1\u5373\u7528</strong>
+            <p style="font-size:0.85rem; color:var(--text-muted);">
+              \u7EAF\u539F\u751F JavaScript ESM \u5B9E\u73B0\uFF0C\u65E0\u8BBA\u514D\u8D39\u7248\u8FD8\u662F\u4F01\u4E1A\u7248 Cloudflare Workers\uFF0C\u5355\u6587\u4EF6\u6216 Wrangler \u5747\u53EF\u79D2\u7EA7\u542F\u52A8\u3002
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+      <p>\u5F00\u6E90\u9879\u76EE\uFF1A<a href="https://github.com/dengyie/cf-doh" target="_blank" rel="noopener">github.com/dengyie/cf-doh</a> \u2022 \u57FA\u4E8E MIT License \u5F00\u6E90</p>
+      <p style="margin-top: 6px; font-size: 0.8rem;">Powered by Cloudflare Workers & Serverless Edge Computing</p>
+    </footer>
+  </div>
+
+  <script>
+    function setQuery(domain) {
+      document.getElementById('domainInput').value = domain;
+      runQuery();
+    }
+
+    async function runQuery() {
+      const domain = document.getElementById('domainInput').value.trim();
+      const type = document.getElementById('typeSelect').value;
+      const box = document.getElementById('resultBox');
+      const btn = document.getElementById('queryBtn');
+      if (!domain) return;
+
+      btn.disabled = true;
+      btn.innerText = '\u67E5\u8BE2\u4E2D...';
+      box.innerHTML = '\u6B63\u5728\u53D1\u8D77 DoH \u67E5\u8BE2...';
+
+      const start = performance.now();
+      try {
+        const resp = await fetch('${config.jsonPath}?name=' + encodeURIComponent(domain) + '&type=' + type);
+        const data = await resp.json();
+        const duration = Math.round(performance.now() - start);
+
+        let html = '';
+        html += '\u23F1\uFE0F \u89E3\u6790\u8017\u65F6: ' + duration + ' ms\\n';
+        html += '\u{1F3AF} \u54CD\u5E94\u72B6\u6001: ' + (data.Status === 0 ? '<span style="color:#10b981">NOERROR (\u6210\u529F)</span>' : '<span style="color:#ef4444">Status ' + data.Status + '</span>') + '\\n';
+        html += '\u{1F512} DNSSEC: ' + (data.AD ? '\u5DF2\u9A8C\u8BC1 (AD=1)' : '\u672A\u5F00\u542F/\u666E\u901A (AD=0)') + '\\n\\n';
+
+        if (data.Answer && data.Answer.length > 0) {
+          html += '\u{1F4CB} \u7B54\u6848\u8BB0\u5F55 (Answers):\\n';
+          data.Answer.forEach(ans => {
+            html += '  \u2022 ' + ans.name + '  ' + ans.type + '  ' + ans.data + ' (TTL: ' + ans.TTL + 's)\\n';
+          });
+        } else {
+          html += '\u26A0\uFE0F \u672A\u67E5\u8BE2\u5230\u5BF9\u5E94\u8BB0\u5F55\u3002\\n';
+        }
+
+        if (data.Authority && data.Authority.length > 0) {
+          html += '\\n\u{1F3DB}\uFE0F \u6743\u5A01\u8BB0\u5F55 (Authority):\\n';
+          data.Authority.forEach(auth => {
+            html += '  \u2022 ' + auth.name + '  ' + auth.type + '  ' + auth.data + '\\n';
+          });
+        }
+
+        box.innerHTML = html;
+      } catch (err) {
+        box.innerHTML = '<span style="color:#ef4444">\u67E5\u8BE2\u5931\u8D25: ' + err.message + '</span>';
+      } finally {
+        btn.disabled = false;
+        btn.innerText = '\u67E5\u8BE2';
+      }
+    }
+
+    function switchTab(name) {
+      const contents = document.querySelectorAll('.tab-content');
+      contents.forEach(c => c.style.display = 'none');
+      const btns = document.querySelectorAll('.tab-btn');
+      btns.forEach(b => b.classList.remove('active'));
+
+      const target = document.getElementById('tab-' + name);
+      if (target) target.style.display = 'block';
+      event.target.classList.add('active');
+    }
+
+    function copyText(txt) {
+      navigator.clipboard.writeText(txt).then(() => {
+        alert('\u5DF2\u590D\u5236\u5230\u526A\u8D34\u677F: ' + txt);
+      });
+    }
+
+    function copyElement(id) {
+      const el = document.getElementById(id);
+      if (el) {
+        copyText(el.innerText);
+      }
+    }
+  <\/script>
+</body>
+</html>`;
+}
+
 // src/worker.js
 var QTYPE_STR = {
   A: 1,
@@ -1071,6 +1647,9 @@ function dnsResponse(body, extraHeaders) {
       "Content-Type": DNS_CONTENT_TYPE,
       "Cache-Control": "no-store",
       "X-Content-Type-Options": "nosniff",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Accept, X-DoH-Token",
       ...extraHeaders || {}
     }
   });
@@ -1153,13 +1732,42 @@ async function handleRequest(request, env) {
   const config = readConfig(env);
   metrics.inc("requests");
   const url = new URL(request.url);
+  if (request.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Accept, X-DoH-Token",
+        "Access-Control-Max-Age": "86400"
+      }
+    });
+  }
   if (url.pathname === "/healthz" || url.pathname === "/metrics") {
     return metrics.healthResponse(config);
   }
   if (url.pathname === "/" && request.method === "GET") {
+    const accept = (request.headers.get("accept") || "").toLowerCase();
+    if (accept.includes("text/html") || accept.includes("*/*") || !accept) {
+      return new Response(renderLandingHtml(url.origin, config), {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-store"
+        }
+      });
+    }
     return new Response(
-      `Cloudflare Workers DoH resolver. Query path: ${url.origin}${config.path} (RFC 8484).`,
-      { headers: { "Content-Type": "text/plain", "Cache-Control": "no-store" } }
+      `cf-doh \u2014 Self-hosted DNS-over-HTTPS Resolver
+
+Endpoints:
+  \u2022 RFC 8484 DoH Query : ${url.origin}${config.path}
+  \u2022 DoH JSON API       : ${url.origin}${config.jsonPath}?name=example.com&type=A
+  \u2022 Health Check       : ${url.origin}/healthz
+  \u2022 Web Console        : ${url.origin}/
+
+GitHub: https://github.com/dengyie/cf-doh
+`,
+      { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } }
     );
   }
   if (config.token) {

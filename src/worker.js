@@ -31,6 +31,7 @@ import { jsonResponse, toJsonResponse } from "./jsonapi.js";
 import { raceGroup, serverFailure } from "./resolver.js";
 import { metrics } from "./metrics.js";
 import { createCache } from "./cache.js";
+import { renderLandingHtml } from "./landing.js";
 
 export { parseDnsMessage, DNS_CONTENT_TYPE };
 
@@ -72,6 +73,9 @@ function dnsResponse(body, extraHeaders) {
       "Content-Type": DNS_CONTENT_TYPE,
       "Cache-Control": "no-store",
       "X-Content-Type-Options": "nosniff",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Accept, X-DoH-Token",
       ...(extraHeaders || {}),
     },
   });
@@ -173,14 +177,41 @@ export async function handleRequest(request, env) {
   metrics.inc("requests");
   const url = new URL(request.url);
 
+  // Handle CORS preflight options request
+  if (request.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Accept, X-DoH-Token",
+        "Access-Control-Max-Age": "86400",
+      },
+    });
+  }
+
   if (url.pathname === "/healthz" || url.pathname === "/metrics") {
     return metrics.healthResponse(config);
   }
   if (url.pathname === "/" && request.method === "GET") {
+    const accept = (request.headers.get("accept") || "").toLowerCase();
+    if (accept.includes("text/html") || accept.includes("*/*") || !accept) {
+      return new Response(renderLandingHtml(url.origin, config), {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-store",
+        },
+      });
+    }
     return new Response(
-      "Cloudflare Workers DoH resolver. Query path: " +
-        `${url.origin}${config.path} (RFC 8484).`,
-      { headers: { "Content-Type": "text/plain", "Cache-Control": "no-store" } }
+      `cf-doh — Self-hosted DNS-over-HTTPS Resolver\n\n` +
+        `Endpoints:\n` +
+        `  • RFC 8484 DoH Query : ${url.origin}${config.path}\n` +
+        `  • DoH JSON API       : ${url.origin}${config.jsonPath}?name=example.com&type=A\n` +
+        `  • Health Check       : ${url.origin}/healthz\n` +
+        `  • Web Console        : ${url.origin}/\n\n` +
+        `GitHub: https://github.com/dengyie/cf-doh\n`,
+      { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } }
     );
   }
 

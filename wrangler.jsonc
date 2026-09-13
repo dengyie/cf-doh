@@ -5,14 +5,14 @@
   "compatibility_date": "2026-07-27",
   "workers_dev": true,
 
-  // KV namespace for rule-list durability. Create it first:
-  //   wrangler kv namespace create RULES_KV
-  // then replace the placeholder binding name below. The binding identifier
-  // ("RULES_KV") is what the worker reads via env.RULES_KV.
+  // KV namespace for rule-list durability. Create it via:
+  //   npx wrangler kv namespace create RULES_KV
+  // or run ./scripts/deploy.sh which provisions it automatically.
+  // The worker runs smoothly in memory even if this is left unset.
   "kv_namespaces": [
     {
       "binding": "RULES_KV",
-      "id": "fe4f5aed731d48aa8d879acfef26873a"
+      "id": "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
     }
   ],
 
