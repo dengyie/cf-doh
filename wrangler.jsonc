@@ -17,13 +17,15 @@
   ],
 
   // Cloudflare Workers Analytics Engine: tracks query latencies, upstream win-rates,
-  // and status codes at edge scale. Optional: worker functions gracefully without it.
-  "analytics_engine_datasets": [
-    {
-      "binding": "DOH_ANALYTICS",
-      "dataset": "cf_doh_metrics"
-    }
-  ],
+  // and status codes at edge scale.
+  // Note: Before enabling this binding, click "Enable" once in your Cloudflare Dashboard:
+  //   https://dash.cloudflare.com/?to=/:account/workers/analytics-engine
+  // "analytics_engine_datasets": [
+  //   {
+  //     "binding": "DOH_ANALYTICS",
+  //     "dataset": "cf_doh_metrics"
+  //   }
+  // ],
 
   // Cron: refresh the rule list daily (04:17 UTC).
   "triggers": {
