@@ -17,6 +17,7 @@
   <a href="#-痛点与核心特性">核心特性</a> •
   <a href="#-支持的网站范围与分流模型">支持网站</a> •
   <a href="#-架构图解">架构原理</a> •
+  <a href="#-在线体验-demo-live-demo">在线 Demo</a> •
   <a href="#-极速部署">极速部署</a> •
   <a href="#-客户端接入配置指南">客户端配置</a> •
   <a href="#-生产环境最佳实践-best-practices">最佳实践</a> •
@@ -34,6 +35,24 @@
 `cf-doh` 是一套**开源、纯原生 JavaScript ESM、零第三方运行时依赖**的 Cloudflare Workers DNS-over-HTTPS (DoH, RFC 8484) 智能网关。
 
 它彻底解决了普通海外公共 DoH（如 1.1.1.1、8.8.8.8）在中国大陆环境下使用时导致的 **CDN 节点漂移至海外、访问变慢、部分站点连接超时** 的致命痛点，同时弥补了主流开源 Cloudflare DoH 脚本**串行重试慢、盲目信任 XFF 导致投毒风险、缺乏现代 Web 运维交互**等缺陷。
+
+---
+
+## 🚀 在线体验 Demo (Live Demo)
+
+为了方便大家快速体验 `cf-doh` 的低延迟与智能分流效果，本项目提供了一个公开的在线体验端点：
+
+| 端点类型 | 地址 / 演示链接 | 说明 |
+| :--- | :--- | :--- |
+| **Web 仪表盘 / 调试台** | [https://doh-demo.mangoqwq.com/](https://doh-demo.mangoqwq.com/) | 内置响应式 Web 控制台，支持实时查询调试、上游竞速延迟与胜出率可视化看板 |
+| **标准 DoH 解析端点** | `https://doh-demo.mangoqwq.com/doh` | 标准 RFC 8484 协议接口（支持 GET / POST） |
+| **Google JSON API** | [`https://doh-demo.mangoqwq.com/json?name=github.com&type=A`](https://doh-demo.mangoqwq.com/json?name=github.com&type=A) | 浏览器点击即可快速测试，免专业命令行工具 |
+| **服务探针 / 状态** | [`https://doh-demo.mangoqwq.com/healthz`](https://doh-demo.mangoqwq.com/healthz) | 查看在线运行状态与上游配置 |
+
+> 🛡️ **关于公用 Demo 的安全与配额防护说明**：
+> - **仅供测试与体验**：该 Demo 仅用于开发者体验、验证解析效果及连通性测试。**请勿将其配置为路由器、局域网或多台生产设备的主力 DNS**。
+> - **已配置 Cloudflare WAF 速率限制**：为防止公用接口被恶意刷量或脚本滥用耗尽配额，Demo 域名已配置严格的 IP 速率限制（单 IP 限制 30 req / 10s，超速触发 HTTP 429 自动阻断并保护后端）。
+> - **生产环境强烈推荐自建**：借助 Cloudflare Workers，一键自建完全免费且仅需 1 分钟（详见下方 [极速部署](#-极速部署)），专属独享每天 100,000 次查询配额！
 
 ---
 
