@@ -8,3 +8,8 @@ dist/
 *CLOUDFLARE_API_TOKEN=*
 *cfk_*
 *cfut_*
+
+# 本地私有/Demo部署配置（防特定账号 KV 命名空间 ID 暴露入库）
+wrangler.*.jsonc
+wrangler.*.toml
+wrangler.*.json

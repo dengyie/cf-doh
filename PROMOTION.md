@@ -31,7 +31,7 @@
 项目已全部开源并配置了全套测试与 CI，欢迎各位佬友 Star ⭐️ 体验或提 PR 交流！
 
 👉 **GitHub 仓库**：https://github.com/dengyie/cf-doh  
-👉 **在线体验 Demo**：https://doh-demo.mangoqwq.com/ （支持在线测试台与测速，已配置 WAF 速率限制）  
+👉 **在线体验 Demo**：https://doh-demo.mangoqwq.com/ （内置在线测试控制台；已配置 Cloudflare WAF 单 IP 30 req/10s 速率限制防刷保护，请勿用于多机压测）  
 👉 **在线部署教程与客户端接入**：详见仓库 README，支持 2 分钟无代码网页端部署！
 
 ---
@@ -65,7 +65,7 @@
 项目采用 MIT 协议开源，无任何运行时 npm 依赖，在 GitHub Actions 上保持自动化多版本 Node 测试覆盖。欢迎大家试用与交流建议！
 
 - 仓库地址：https://github.com/dengyie/cf-doh
-- 在线体验 Demo：https://doh-demo.mangoqwq.com/
+- 在线体验 Demo：https://doh-demo.mangoqwq.com/ （支持在线测试台与测速；已配置 WAF 速率限制 30 req/10s，供轻量体验）
 - 详细文档与接入指南：详见 README
 
 ---
@@ -84,7 +84,7 @@
 💡 纯原生 JS 实现，零运行时依赖，Cloudflare 免费版即开即用，支持网页端一键粘贴部署。
 
 🔗 **项目地址**：https://github.com/dengyie/cf-doh  
-🌐 **在线 Demo**：https://doh-demo.mangoqwq.com/
+🌐 **在线 Demo**：https://doh-demo.mangoqwq.com/ （内置在线测试台，已配 WAF 单 IP 30次/10s 限频）
 
 ---
 
@@ -101,7 +101,7 @@ I open-sourced **cf-doh** — a high-performance, self-hosted DNS-over-HTTPS (RF
 - ✨ Built-in interactive web console & config generator
 - 🌱 Zero runtime dependencies (Pure ESM)
 
-Live Demo: https://doh-demo.mangoqwq.com/
+Live Demo: https://doh-demo.mangoqwq.com/ (Protected by Cloudflare WAF rate limiting: 30 req/10s per IP)
 Check it out: https://github.com/dengyie/cf-doh
 
 #DNS #DoH #Cloudflare #OpenSource #Networking #WebDev
