@@ -333,9 +333,10 @@ sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/cf-doh-dot.sh
 | 私人 DNS 显示「无法连接」 | 证书为私有 CA（自签名 / 面板默认证书） | 必须换成系统信任的公网 CA（Let's Encrypt 等），RFC 8310 严格校验，无任何绕过 |
 | 私人 DNS 显示「无法连接」 | 证书域名与填入的主机名不一致 | 证书 SAN/CN 必须与私人 DNS 主机名完全一致 |
 | 能连上但分流与 DoH 不一致 | DoT 与 DoH 部署在两台机器、规则源不同 | 两个入口读取同一套 `RULES_URL` / `DOH_*` 变量，保持配置一致即可 |
+| 私人 DNS 显示「无法连接」（仅 IPv6-only 网络，如部分运营商 LTE） | `DOT_HOST` 默认 `0.0.0.0` 只监听 IPv4 | 设 `DOT_HOST=::`（Linux 上即 IPv4/IPv6 双栈）并确认域名已有 AAAA 记录 |
 | 配错后手机「全网断网」 | Android 私人 DNS 失败后**不会**自动回退明文 53 解析 | 属系统预期行为：修正服务端（或改回「自动」）即可恢复 |
 
-> 💡 **DoT 专属环境变量**：`DOT_PORT`（默认 853）、`DOT_HOST`（默认 0.0.0.0）、`DOT_TLS_CERT` / `DOT_TLS_KEY`（PEM 路径，等价 `--cert` / `--key`）、`DOT_IDLE_TIMEOUT_SECONDS`（默认 30，空闲连接回收）、`DOT_MAX_CONNECTIONS`（默认 128）、`DOT_REFRESH_SECONDS`（默认 21600，规则/黑名单刷新周期）。解析行为（上游、分流、ECS、缓存、DNSSEC）完整复用上文的 `DOH_*` 系列变量（Node 进程读取同名环境变量）。
+> 💡 **DoT 专属环境变量**：`DOT_PORT`（默认 853）、`DOT_HOST`（默认 0.0.0.0，需 IPv6 双栈监听时设为 `::`）、`DOT_TLS_CERT` / `DOT_TLS_KEY`（PEM 路径，等价 `--cert` / `--key`）、`DOT_IDLE_TIMEOUT_SECONDS`（默认 30，空闲连接回收）、`DOT_MAX_CONNECTIONS`（默认 128）、`DOT_REFRESH_SECONDS`（默认 21600，规则/黑名单刷新周期）。解析行为（上游、分流、ECS、缓存、DNSSEC）复用上文的 `DOH_*` 系列变量（Node 进程读取同名环境变量）；**例外**：`DOH_TOKEN` 仅对 DoH HTTP 入口生效——DoT 协议没有携带 token 的位置，853 端点需靠安全组/防火墙控制访问，进程启动时若检测到 `DOH_TOKEN` 会打印告警。
 
 ---
 

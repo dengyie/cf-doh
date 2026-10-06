@@ -30,7 +30,7 @@ import { Buffer } from "node:buffer";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { readConfig } from "./config.js";
+import { parseUint, readConfig } from "./config.js";
 import { buildErrorResponse, parseDnsMessage } from "./dns.js";
 import { resolveQuery } from "./core.js";
 import { serverFailure } from "./resolver.js";
@@ -41,6 +41,13 @@ import { refreshBlock } from "./filter.js";
 const RCODE_FORMERR = 1;
 const FRAME_HEADER_BYTES = 2; // RFC 7858 §3.2 length prefix
 const MIN_DNS_MESSAGE_BYTES = 12; // DNS header
+// RFC 7766 flow control: stop reading a connection once this many queries are
+// in flight, and resume as they drain (same strategy as unbound's tcp queries).
+const MAX_INFLIGHT_QUERIES_PER_CONNECTION = 64;
+// A pipelining client that never reads its answers must not grow our heap
+// without bound; past this buffered-output size we drop the connection.
+const MAX_SOCKET_BUFFERED_BYTES = 1 << 20;
+const TLS_HANDSHAKE_TIMEOUT_MS = 15_000; // Node default is 120s — too generous
 
 /**
  * Incremental RFC 7858 deframer for a byte stream. Feed it raw socket chunks;
@@ -117,6 +124,10 @@ export function normalizeClientAddress(remoteAddress) {
 function writeDotFrame(socket, message) {
   if (!socket || socket.destroyed || socket.writableEnded) return;
   try {
+    if (socket.bufferSize > MAX_SOCKET_BUFFERED_BYTES) {
+      socket.destroy();
+      return;
+    }
     socket.write(encodeDotFrame(message));
   } catch {
     /* client vanished mid-write; the error handler destroys the socket */
@@ -134,11 +145,20 @@ async function answerQuery(socket, query, { config, env, clientAddress }) {
     writeDotFrame(socket, buildErrorResponse(query, RCODE_FORMERR, null));
     return;
   }
-  const outcome = await resolveQuery(query, parsed, {
-    clientIp: clientAddress,
-    env,
-    config,
-  });
+  let outcome;
+  try {
+    outcome = await resolveQuery(query, parsed, {
+      clientIp: clientAddress,
+      env,
+      config,
+    });
+  } catch {
+    // resolveQuery is designed not to throw; if a future regression does,
+    // degrade to SERVFAIL instead of leaving the client hanging.
+    metrics.inc("servfail");
+    writeDotFrame(socket, serverFailure(query, parsed.question));
+    return;
+  }
   if (!outcome.ok) {
     metrics.inc("servfail");
     writeDotFrame(socket, serverFailure(query, parsed.question));
@@ -154,6 +174,8 @@ async function answerQuery(socket, query, { config, env, clientAddress }) {
  */
 export function handleDotConnection(socket, { config, env, clientAddress, idleTimeoutMs }) {
   const framer = new DotFramer(config.maxQueryBytes);
+  let inFlight = 0;
+  let paused = false;
   socket.on("data", (chunk) => {
     let messages;
     try {
@@ -164,7 +186,22 @@ export function handleDotConnection(socket, { config, env, clientAddress, idleTi
     }
     for (const message of messages) {
       // Pipelining (RFC 7766): resolve concurrently, never head-of-line block.
-      answerQuery(socket, message, { config, env, clientAddress }).catch(() => {});
+      inFlight += 1;
+      answerQuery(socket, message, { config, env, clientAddress })
+        .catch(() => {})
+        .finally(() => {
+          inFlight -= 1;
+          if (paused && inFlight < MAX_INFLIGHT_QUERIES_PER_CONNECTION) {
+            paused = false;
+            socket.resume();
+          }
+        });
+    }
+    // Saturated: apply TCP backpressure to the client instead of growing our
+    // memory or amplifying upstream traffic.
+    if (inFlight >= MAX_INFLIGHT_QUERIES_PER_CONNECTION && !paused) {
+      paused = true;
+      socket.pause();
     }
   });
   socket.setTimeout(idleTimeoutMs, () => {
@@ -188,23 +225,26 @@ export function createDotServer({
   logger = () => {},
 }) {
   let connections = 0;
-  const server = tls.createServer({ cert, key }, (socket) => {
-    connections += 1;
-    if (connections > maxConnections) {
-      metrics.inc("dot_rejected");
-      logger(`connection limit reached (${maxConnections}), rejecting`);
-      socket.destroy();
-      connections -= 1;
-      return;
+  const server = tls.createServer(
+    { cert, key, handshakeTimeout: TLS_HANDSHAKE_TIMEOUT_MS },
+    (socket) => {
+      connections += 1;
+      if (connections > maxConnections) {
+        metrics.inc("dot_rejected");
+        logger(`connection limit reached (${maxConnections}), rejecting`);
+        socket.destroy();
+        connections -= 1;
+        return;
+      }
+      metrics.inc("dot_connections");
+      const clientAddress = normalizeClientAddress(socket.remoteAddress);
+      logger(`connection from ${clientAddress ?? socket.remoteAddress}:${socket.remotePort}`);
+      handleDotConnection(socket, { config, env, clientAddress, idleTimeoutMs });
+      socket.on("close", () => {
+        connections -= 1;
+      });
     }
-    metrics.inc("dot_connections");
-    const clientAddress = normalizeClientAddress(socket.remoteAddress);
-    logger(`connection from ${clientAddress ?? socket.remoteAddress}:${socket.remotePort}`);
-    handleDotConnection(socket, { config, env, clientAddress, idleTimeoutMs });
-    socket.on("close", () => {
-      connections -= 1;
-    });
-  });
+  );
   server.on("tlsClientError", (err) => {
     metrics.inc("dot_tls_errors");
     logger(`tls handshake failed: ${err.message}`);
@@ -270,6 +310,12 @@ export function main(argv = process.argv.slice(2), env = process.env) {
   }
 
   const config = readConfig(env);
+  if (config.token) {
+    defaultLogger(
+      "WARNING: DOH_TOKEN is set, but DoT (RFC 7858) has no way to carry a token — " +
+        "this port is open to anyone who can reach it. Restrict access at the network layer."
+    );
+  }
   const certPath = args.cert || env.DOT_TLS_CERT;
   const keyPath = args.key || env.DOT_TLS_KEY;
   if (!certPath || !keyPath) {
@@ -294,11 +340,13 @@ export function main(argv = process.argv.slice(2), env = process.env) {
     return;
   }
 
-  const port = Number(args.port ?? env.DOT_PORT ?? 853);
+  // Same numeric-parsing convention as every DOH_* variable: invalid values
+  // fall back to the default instead of leaking NaN into timers/limits.
+  const port = parseUint(args.port ?? env.DOT_PORT, 853, 1, 65535);
   const host = args.host || env.DOT_HOST || "0.0.0.0";
-  const idleTimeoutMs = Math.max(5, Number(env.DOT_IDLE_TIMEOUT_SECONDS ?? 30)) * 1000;
-  const maxConnections = Math.max(1, Number(env.DOT_MAX_CONNECTIONS ?? 128));
-  const refreshSeconds = Math.max(60, Number(env.DOT_REFRESH_SECONDS ?? 21600));
+  const idleTimeoutMs = parseUint(env.DOT_IDLE_TIMEOUT_SECONDS, 30, 5, 86400) * 1000;
+  const maxConnections = parseUint(env.DOT_MAX_CONNECTIONS, 128, 1, 65536);
+  const refreshSeconds = parseUint(env.DOT_REFRESH_SECONDS, 21600, 60, 7 * 86400);
 
   const server = createDotServer({
     config,
@@ -310,9 +358,12 @@ export function main(argv = process.argv.slice(2), env = process.env) {
     logger: defaultLogger,
   });
   server.on("error", (err) => {
-    // Surface listener errors (EACCES on 853, EADDRINUSE, bad PEM) clearly.
+    // A listener failure (EACCES on 853, EADDRINUSE, bad PEM) is unrecoverable
+    // for a standalone server: exit non-zero so the supervisor (systemd
+    // Restart=always) can retry, instead of hanging as a zombie that holds the
+    // keep-alive timer open.
     defaultLogger(`server error: ${err.message}`);
-    process.exitCode = 1;
+    process.exit(1);
   });
   server.listen(port, host, () => {
     defaultLogger(

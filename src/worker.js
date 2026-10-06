@@ -404,4 +404,4 @@ export default {
   },
 };
 
-export { resetRules, readConfig, isBlocked, resetBlockFn as resetBlock };
+export { resetBlockFn as resetBlock };

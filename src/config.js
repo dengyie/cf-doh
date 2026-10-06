@@ -31,7 +31,8 @@ function asSingle(s, fallback) {
   return v ? v : fallback;
 }
 
-function parseUint(val, fallback, min = 0, max = Infinity) {
+/** Single source of numeric env parsing: non-finite → fallback, then clamp. */
+export function parseUint(val, fallback, min = 0, max = Infinity) {
   const n = Number(val);
   if (!Number.isFinite(n)) return fallback;
   return Math.min(max, Math.max(min, Math.floor(n)));

@@ -503,11 +503,6 @@ async function adoptRawRules(text, env) {
     bytes: bytes.byteLength
   };
 }
-function resetRules() {
-  live = null;
-  coldInflight = null;
-  failUntil = 0;
-}
 
 // src/filter.js
 var DEC2 = new TextDecoder("latin1");
@@ -2725,9 +2720,6 @@ export {
   DNS_CONTENT_TYPE,
   worker_default as default,
   handleRequest,
-  isBlocked,
   parseDnsMessage,
-  readConfig,
-  resetBlock,
-  resetRules
+  resetBlock
 };
