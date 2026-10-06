@@ -150,7 +150,7 @@ export function statsSnapshot(config = {}) {
 
   return {
     service: "cf-doh",
-    version: "1.1.0",
+    version: "1.2.0",
     uptimeSec: Math.round((Date.now() - startedAt) / 1000),
     totalRequests: COUNTERS.requests,
     cache: {
@@ -402,7 +402,7 @@ export function healthResponse(config) {
     {
       status: "ok",
       service: "cf-doh",
-      version: "1.1.0",
+      version: "1.2.0",
       uptimeSec: Math.round((Date.now() - startedAt) / 1000),
       counters: snapshot(),
       stats: statsSnapshot(config),

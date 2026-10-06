@@ -20,6 +20,7 @@
   <a href="#-在线体验-demo-live-demo">在线 Demo</a> •
   <a href="#-极速部署">极速部署</a> •
   <a href="#-客户端接入配置指南">客户端配置</a> •
+  <a href="#-dot-支持android-私人-dns">DoT / Android 私人 DNS</a> •
   <a href="#-生产环境最佳实践-best-practices">最佳实践</a> •
   <a href="#-进阶玩法">进阶玩法</a> •
   <a href="#-本地开发与测试">本地测试</a> •
@@ -32,7 +33,7 @@
 
 ## 📖 项目简介
 
-`cf-doh` 是一套**开源、纯原生 JavaScript ESM、零第三方运行时依赖**的 Cloudflare Workers DNS-over-HTTPS (DoH, RFC 8484) 智能网关。
+`cf-doh` 是一套**开源、纯原生 JavaScript ESM、零第三方运行时依赖**的 Cloudflare Workers DNS-over-HTTPS (DoH, RFC 8484) 智能网关，并附带一个**共享同一套解析核心的 DoT (DNS-over-TLS, RFC 7858) 独立入口**，可用于 Android 系统级「私人 DNS」。
 
 它彻底解决了普通海外公共 DoH（如 1.1.1.1、8.8.8.8）在中国大陆环境下使用时导致的 **CDN 节点漂移至海外、访问变慢、部分站点连接超时** 的致命痛点，同时弥补了主流开源 Cloudflare DoH 脚本**串行重试慢、盲目信任 XFF 导致投毒风险、缺乏现代 Web 运维交互**等缺陷。
 
@@ -74,7 +75,7 @@
 | **交互式 Web 控制台** | ❌ 404 或无界面 | ❌ 简陋纯文本或 400 | **✨ 内置现代化响应式 Web 仪表盘 + 在线实时调试台** |
 | **性能度量与可视化** | ❌ 仅全局统计 | ❌ 无 | **📊 Cloudflare Analytics Engine + P95 / 胜出率实时可视化看板** |
 | **规则热更新 (免部署)** | - | ❌ 需重新打包部署 | **⚡ GitHub Action 自动同步 + Webhook 秒级推送写入 KV** |
-| **API 兼容性** | 仅标准 DoH | 仅标准 DoH | **✅ RFC 8484 + Google 风格 JSON API + 完整 CORS** |
+| **API 兼容性** | 仅标准 DoH | 仅标准 DoH | **✅ RFC 8484 + RFC 7858 DoT（Android 私人 DNS）+ Google 风格 JSON API + 完整 CORS** |
 | **广告 / 恶意拦截** | 依赖特定 IP | ❌ 无 | **🛡️ 可选 Blocklist 规则拦截（NXDOMAIN / 0.0.0.0）** |
 | **运行时依赖** | - | 部分依赖庞大 npm 包 | **🌱 0 外部运行时依赖，秒级冷启动** |
 
@@ -226,6 +227,7 @@ doh-format = wire
 
 ### 5. Android 13+ / 浏览器安全 DNS
 - **Chrome / Edge / Firefox**：进入浏览器设置 -> 隐私和安全性 -> 使用安全 DNS -> 选择「自定义」-> 填入 `https://doh.yourdomain.com/doh`。
+- **Android 系统级「私人 DNS (Private DNS)」**：⚠️ 该设置在协议上**只支持 DoT（RFC 7858），不支持 DoH**，直接填入 DoH 域名会显示「无法连接」且整机解析失效。请先按下一节 [DoT 支持](#-dot-支持android-私人-dns) 在 VPS 上启动 `src/dot.js`，再填入持有 853 端口 TLS 证书的域名。
 
 ### 6. 命令行调试 (cURL / dig / kdig)
 ```bash
@@ -238,6 +240,102 @@ curl -s "https://doh.yourdomain.com/json?name=linux.do&type=A"
 # 3. 使用 kdig 测试 RFC 8484 协议
 kdig -d @doh.yourdomain.com +https=/doh linux.do A
 ```
+
+---
+
+## 🔐 DoT 支持（Android 私人 DNS）
+
+> 自 v1.2.0 起，除 DoH 外 cf-doh 还提供 RFC 7858 **DoT (DNS-over-TLS)** 服务端，让 Android 系统级「私人 DNS / Private DNS」也能用上同一套分流解析核心。
+
+### 为什么 Worker 做不了 DoT？（架构决策，务必先读）
+
+- **Android 私人 DNS 在协议上只认 DoT**：仅实现 RFC 7858（TLS + TCP 853），不接受 DoH，也不接受 IP 字面量；「指定主机名」模式还要求证书由**系统信任的 CA** 签发（RFC 8310 严格校验）。
+- **Cloudflare Workers 只暴露 443 上的 HTTPS**，无法监听 TCP 853，也无法承载 `node:tls` 这类原始 TLS 服务；把自定义端口挂到 Worker 的唯一途径是 Spectrum——**付费产品**，与本项目「免费自建」定位冲突，不采纳。
+- 因此 DoT 以独立入口 `src/dot.js` 落地在**另一个可自托管的目标**（VPS / 家庭服务器，Node 18+，`node:tls` 监听 853），零第三方运行时依赖。
+
+### 同一套核心，两个入口
+
+```
+                ┌─────────────────────────────┐
+ DoH (443) ───▶ │  Cloudflare Workers         │──┐
+ RFC 8484       │  src/worker.js              │  │
+                └─────────────────────────────┘  │    规则分流 / Blocklist / ECS 注入
+                                                 ├──▶ 并发竞价 / 缓存 / DNSSEC 透传
+                ┌─────────────────────────────┐  │    （src/core.js，运行时无关）
+ DoT (853) ───▶ │  任意 VPS · Node 18+        │──┘
+ RFC 7858       │  src/dot.js (node:tls)      │
+                └─────────────────────────────┘
+```
+
+两个入口共享 `src/core.js` 的完整管线：国内/全球规则分流、Blocklist 拦截、ECS 注入（DoT 直接取 TLS 对端地址做掩码，不存在 XFF 伪造面）、上游并发竞价、内存缓存、DNSSEC AD 透传——**不会出现两套逻辑漂移**。测试套件中已断言：同一查询经 DoT 与 DoH 入口解析，命中同一上游组且回答字节一致（`test/dot.test.mjs`）。
+
+### VPS 部署步骤（免费）
+
+前提：一台 VPS（或家庭宽带有公网 IPv4/IPv6），一个解析到它的主机名（如 `dns.example.com`），Node.js 18+。
+
+```bash
+# 1. 获取代码
+git clone https://github.com/dengyie/cf-doh.git && cd cf-doh
+
+# 2. 签发公网 CA 证书（Let's Encrypt；Android 不信任私有 CA，此步不可省略）
+sudo certbot certonly --standalone -d dns.example.com
+
+# 3. 启动 DoT 服务（监听 853 需要 root 或 CAP_NET_BIND_SERVICE 能力）
+sudo setcap 'cap_net_bind_service=+ep' "$(readlink -f "$(command -v node)")"
+npm run start:dot -- \
+  --cert /etc/letsencrypt/live/dns.example.com/fullchain.pem \
+  --key  /etc/letsencrypt/live/dns.example.com/privkey.pem
+```
+
+生产环境建议用 systemd 守护（`/etc/systemd/system/cf-doh-dot.service`）：
+
+```ini
+[Unit]
+Description=cf-doh DoT (DNS-over-TLS, RFC 7858) server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/cf-doh
+ExecStart=/usr/bin/node src/dot.js --cert /etc/letsencrypt/live/dns.example.com/fullchain.pem --key /etc/letsencrypt/live/dns.example.com/privkey.pem
+Restart=always
+RestartSec=3
+User=cfdoh
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadOnlyPaths=/etc/letsencrypt
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload && sudo systemctl enable --now cf-doh-dot
+
+# 证书自动续期后重启服务（certbot renewal hook）
+echo '#!/bin/sh' | sudo tee /etc/letsencrypt/renewal-hooks/deploy/cf-doh-dot.sh
+echo 'systemctl try-restart cf-doh-dot' | sudo tee -a /etc/letsencrypt/renewal-hooks/deploy/cf-doh-dot.sh
+sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/cf-doh-dot.sh
+```
+
+### Android 手机配置
+
+1. **设置 → 连接与共享 → 私人 DNS**（不同品牌路径略有差异，可直接在设置中搜索「私人 DNS」）；
+2. 选择「**指定主机名**」，填入持有 853 证书的主机名 `dns.example.com`（若你的 DoH 与 DoT 部署在同一域名下则相同，否则**不是** Cloudflare Worker 的 DoH 域名）；
+3. 保存即可。可用 `adb shell dumpsys connectivity | grep -i -A3 privatedns` 观察「验证 / 成功」状态。
+
+### 常见失败原因排查
+
+| 现象 | 原因 | 处理 |
+| :--- | :--- | :--- |
+| 私人 DNS 显示「无法连接」 | 853 未放行（云厂商安全组 / 防火墙 / 运营商封锁） | 在 VPS 上自测 `openssl s_client -connect dns.example.com:853 -servername dns.example.com`；换端口无效——Android 私人 DNS 固定连 853 |
+| 私人 DNS 显示「无法连接」 | 证书为私有 CA（自签名 / 面板默认证书） | 必须换成系统信任的公网 CA（Let's Encrypt 等），RFC 8310 严格校验，无任何绕过 |
+| 私人 DNS 显示「无法连接」 | 证书域名与填入的主机名不一致 | 证书 SAN/CN 必须与私人 DNS 主机名完全一致 |
+| 能连上但分流与 DoH 不一致 | DoT 与 DoH 部署在两台机器、规则源不同 | 两个入口读取同一套 `RULES_URL` / `DOH_*` 变量，保持配置一致即可 |
+| 配错后手机「全网断网」 | Android 私人 DNS 失败后**不会**自动回退明文 53 解析 | 属系统预期行为：修正服务端（或改回「自动」）即可恢复 |
+
+> 💡 **DoT 专属环境变量**：`DOT_PORT`（默认 853）、`DOT_HOST`（默认 0.0.0.0）、`DOT_TLS_CERT` / `DOT_TLS_KEY`（PEM 路径，等价 `--cert` / `--key`）、`DOT_IDLE_TIMEOUT_SECONDS`（默认 30，空闲连接回收）、`DOT_MAX_CONNECTIONS`（默认 128）、`DOT_REFRESH_SECONDS`（默认 21600，规则/黑名单刷新周期）。解析行为（上游、分流、ECS、缓存、DNSSEC）完整复用上文的 `DOH_*` 系列变量（Node 进程读取同名环境变量）。
 
 ---
 
@@ -399,6 +497,7 @@ npm run build
 - `ecs.forward.mjs`：EDNS0 OPT 客户端子网精准注入测试
 - `filter-json-dnssec.mjs`：DNSSEC AD 透传、Google JSON API、Blocklist 黑名单拦截验证
 - `landing.cors.mjs`：跨域预检与 Web 仪表盘交互测试
+- `dot.test.mjs`：RFC 7858 帧协议、TLS 端到端（pipelining / 超大帧恢复 / 空闲回收）、DoT 与 DoH 入口行为一致性
 - `bundle.smoke.mjs`：esbuild 单文件打包冒烟测试
 
 ---

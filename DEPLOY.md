@@ -70,3 +70,22 @@ npx wrangler deploy
 3. **保持默认 ECS /24 掩码**：兼顾客户端隐私保护与国内 CDN 就近调度精准度。
 4. **接入 GitHub Actions 每日同步**：配置 `DOH_ENDPOINT` 与 `RULES_SYNC_SECRET` Secrets，享受全自动免维护规则热更新。
 5. **开启 Analytics Engine 监控**：在 Cloudflare Dashboard 点击一次开启，即可跨全球 PoP 观察 P95 延迟与上游健康度。
+
+---
+
+## DoT 部署（Android 私人 DNS，VPS 自托管）
+
+Cloudflare Workers 只暴露 443 上的 HTTPS，**无法监听 TCP 853**（Spectrum 为付费产品，不采纳），因此 RFC 7858 DoT 由独立的 Node 18+ 入口 `src/dot.js` 承载——与 Worker 共享 `src/core.js` 同一套分流 / 竞价 / ECS 核心，部署在任意 VPS 上（免费）：
+
+```bash
+git clone https://github.com/dengyie/cf-doh.git && cd cf-doh
+
+# 签发公网 CA 证书（Android 不信任私有 CA，必须 Let's Encrypt 等）
+sudo certbot certonly --standalone -d dns.example.com
+
+# 启动（监听 853 需 root 或 CAP_NET_BIND_SERVICE）
+sudo setcap 'cap_net_bind_service=+ep' "$(readlink -f "$(command -v node)")"
+npm run start:dot -- --cert /etc/letsencrypt/live/dns.example.com/fullchain.pem --key /etc/letsencrypt/live/dns.example.com/privkey.pem
+```
+
+systemd 守护、证书续期 hook、Android 私人 DNS 配置步骤与常见失败排查，见 [README 的 DoT 章节](README.md#-dot-支持android-私人-dns)。

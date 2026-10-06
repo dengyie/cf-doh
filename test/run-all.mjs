@@ -15,6 +15,7 @@ const tests = [
   "analytics.test.mjs",
   "analytics-global.test.mjs",
   "rules-sync.test.mjs",
+  "dot.test.mjs",
   "bundle.smoke.mjs",
 ];
 let allOk = true;

@@ -321,137 +321,6 @@ function answerTtlSeconds(buf, info) {
   return minTtl === Infinity ? 0 : minTtl;
 }
 
-// src/ecs.js
-var ECS_OPTION_CODE = 8;
-function encodeEcsRdata(family, networkBytes, prefixLength) {
-  const addrLen = Math.ceil(prefixLength / 8);
-  const rdata = new Uint8Array(4 + addrLen);
-  rdata[0] = family >> 8 & 255;
-  rdata[1] = family & 255;
-  rdata[2] = prefixLength;
-  rdata[3] = 0;
-  rdata.set(networkBytes.subarray(0, addrLen), 4);
-  return rdata;
-}
-function wrapEcsOption(rdata) {
-  const out = new Uint8Array(2 + 2 + rdata.length);
-  out[0] = ECS_OPTION_CODE >> 8 & 255;
-  out[1] = ECS_OPTION_CODE & 255;
-  out[2] = rdata.length >> 8 & 255;
-  out[3] = rdata.length & 255;
-  out.set(rdata, 4);
-  return out;
-}
-
-// src/ip.js
-function isIpv4GlobalUnicast(b) {
-  const a = b[0];
-  if (a === 0 || a === 10 || a === 127 || a >= 224) return false;
-  const second = b[1];
-  if (a === 100 && second >= 64 && second <= 127) return false;
-  if (a === 169 && second === 254) return false;
-  if (a === 172 && second >= 16 && second <= 31) return false;
-  if (a === 192 && second === 168) return false;
-  if (a === 192 && second === 0 && b[2] === 0) return false;
-  if (a === 192 && second === 0 && b[2] === 2) return false;
-  if (a === 192 && b[1] === 88 && b[2] === 99) return false;
-  if (a === 198 && (second === 18 || second === 19)) return false;
-  if (a === 198 && second === 51 && b[2] === 100) return false;
-  if (a === 203 && second === 0 && b[2] === 113) return false;
-  return true;
-}
-function isV6GlobalUnicast(b) {
-  if ((b[0] & 224) !== 32) return false;
-  if (b[0] === 32 && b[1] === 1 && b[2] === 13 && b[3] === 184) return false;
-  return true;
-}
-function parseIpString(value) {
-  const s = String(value || "").trim();
-  if (s.includes(":")) {
-    return parseIpv6(s);
-  }
-  return parseIpv4(s);
-}
-function parseIpv4(s) {
-  const parts = s.split(".");
-  if (parts.length !== 4) return null;
-  const bytes = new Uint8Array(4);
-  for (let i = 0; i < 4; i += 1) {
-    const p = parts[i];
-    if (!/^(0|[1-9][0-9]{0,2})$/.test(p)) return null;
-    const n = Number(p);
-    if (n > 255) return null;
-    bytes[i] = n;
-  }
-  return { family: 1, bytes };
-}
-function parseIpv6(s) {
-  if (s.length === 0 || s.includes("%")) return null;
-  let address = s;
-  const lastColon = address.lastIndexOf(":");
-  const lastPart = lastColon >= 0 ? address.slice(lastColon + 1) : address;
-  let ipv4Tail = null;
-  let hasIpv4Tail = false;
-  if (lastPart.includes(".")) {
-    const v4 = parseIpv4(lastPart);
-    if (v4 === null) return null;
-    ipv4Tail = v4.bytes;
-    hasIpv4Tail = true;
-    address = `${address.slice(0, lastColon)}:v4`;
-  }
-  const halves = address.split("::");
-  if (halves.length > 2) return null;
-  const leftParts = halves[0] === "" ? [] : halves[0].split(":");
-  const rightParts = halves.length === 1 || halves[1] === "" ? [] : halves[1].split(":");
-  const parseParts = (arr) => {
-    const out = [];
-    for (const part of arr) {
-      if (part === "v4") {
-        if (!hasIpv4Tail) return null;
-        out.push(ipv4Tail[0] << 8 | ipv4Tail[1], ipv4Tail[2] << 8 | ipv4Tail[3]);
-      } else {
-        if (!/^[0-9a-fA-F]{1,4}$/.test(part)) return null;
-        out.push(parseInt(part, 16));
-      }
-    }
-    return out;
-  };
-  const left = parseParts(leftParts);
-  const right = parseParts(rightParts);
-  if (left === null || right === null) return null;
-  const hasCompression = halves.length === 2;
-  const missing = 8 - left.length - right.length;
-  if (!hasCompression && missing !== 0 || hasCompression && missing < 1) return null;
-  const words = [...left, ...new Array(missing).fill(0), ...right];
-  if (words.length !== 8) return null;
-  const bytes = new Uint8Array(16);
-  for (let i = 0; i < 8; i += 1) {
-    bytes[i * 2] = words[i] >>> 8 & 255;
-    bytes[i * 2 + 1] = words[i] & 255;
-  }
-  let mapped = true;
-  for (let i = 0; i < 10; i += 1) if (bytes[i] !== 0) mapped = false;
-  if (mapped && bytes[10] === 255 && bytes[11] === 255) {
-    return { family: 1, bytes: bytes.slice(12) };
-  }
-  return { family: 2, bytes };
-}
-function isGlobalUnicast(ip) {
-  return ip ? ip.family === 1 ? isIpv4GlobalUnicast(ip.bytes) : isV6GlobalUnicast(ip.bytes) : false;
-}
-function subnetForEcs(cfConnectingIp, ipv4Prefix, ipv6Prefix) {
-  if (!cfConnectingIp) return null;
-  const ip = parseIpString(cfConnectingIp);
-  if (ip === null || !isGlobalUnicast(ip)) return null;
-  const prefixLength = ip.family === 1 ? ipv4Prefix : ipv6Prefix;
-  const network = ip.bytes.slice();
-  const whole = Math.floor(prefixLength / 8);
-  const rem = prefixLength % 8;
-  if (rem !== 0) network[whole] = network[whole] & 255 << 8 - rem;
-  network.fill(0, whole + (rem === 0 ? 0 : 1));
-  return { family: ip.family, bytes: ip.bytes, network, prefixLength };
-}
-
 // src/rules.js
 var DEC = new TextDecoder("latin1");
 var ENC = new TextEncoder();
@@ -1174,7 +1043,7 @@ function statsSnapshot(config = {}) {
   const cacheHitRate = totalCacheRequests > 0 ? `${(COUNTERS.cache_hit / totalCacheRequests * 100).toFixed(1)}%` : "0.0%";
   return {
     service: "cf-doh",
-    version: "1.1.0",
+    version: "1.2.0",
     uptimeSec: Math.round((Date.now() - startedAt) / 1e3),
     totalRequests: COUNTERS.requests,
     cache: {
@@ -1399,7 +1268,7 @@ function healthResponse(config) {
     {
       status: "ok",
       service: "cf-doh",
-      version: "1.1.0",
+      version: "1.2.0",
       uptimeSec: Math.round((Date.now() - startedAt) / 1e3),
       counters: snapshot(),
       stats: statsSnapshot(config),
@@ -1436,41 +1305,6 @@ var metrics = {
   healthResponse,
   resetMetrics
 };
-
-// src/cache.js
-var DEFAULT_SIZE = 1024;
-function createCache({ size = DEFAULT_SIZE, now = Date.now } = {}) {
-  const map = /* @__PURE__ */ new Map();
-  const key = (qname, qtype, ecs) => `${qname.toLowerCase()}|${qtype}|${ecs}`;
-  return {
-    /** Look up; returns answer bytes on fresh hit, else null. */
-    get(qname, qtype, ecs, ts = now()) {
-      const k = key(qname, qtype, ecs);
-      const e = map.get(k);
-      if (!e) return null;
-      if (e.expiresAt <= ts) {
-        map.delete(k);
-        return null;
-      }
-      return e.value;
-    },
-    /** Store an answer for `ttl` seconds. ttl <= 0 skips caching. */
-    set(qname, qtype, ecs, value, ttl, ts = now()) {
-      if (ttl <= 0) return;
-      const k = key(qname, qtype, ecs);
-      map.set(k, { value, expiresAt: ts + ttl * 1e3 });
-      while (map.size > size) {
-        const oldest = map.keys().next().value;
-        if (oldest === void 0) break;
-        map.delete(oldest);
-      }
-    },
-    /** Number of live entries (metrics). */
-    size() {
-      return map.size;
-    }
-  };
-}
 
 // src/landing.js
 function renderLandingHtml(origin, config) {
@@ -2275,6 +2109,296 @@ kdig -d @${new URL(origin).hostname} +https=${config.path} linux.do A</code></pr
 </html>`;
 }
 
+// src/ecs.js
+var ECS_OPTION_CODE = 8;
+function encodeEcsRdata(family, networkBytes, prefixLength) {
+  const addrLen = Math.ceil(prefixLength / 8);
+  const rdata = new Uint8Array(4 + addrLen);
+  rdata[0] = family >> 8 & 255;
+  rdata[1] = family & 255;
+  rdata[2] = prefixLength;
+  rdata[3] = 0;
+  rdata.set(networkBytes.subarray(0, addrLen), 4);
+  return rdata;
+}
+function wrapEcsOption(rdata) {
+  const out = new Uint8Array(2 + 2 + rdata.length);
+  out[0] = ECS_OPTION_CODE >> 8 & 255;
+  out[1] = ECS_OPTION_CODE & 255;
+  out[2] = rdata.length >> 8 & 255;
+  out[3] = rdata.length & 255;
+  out.set(rdata, 4);
+  return out;
+}
+
+// src/ip.js
+function isIpv4GlobalUnicast(b) {
+  const a = b[0];
+  if (a === 0 || a === 10 || a === 127 || a >= 224) return false;
+  const second = b[1];
+  if (a === 100 && second >= 64 && second <= 127) return false;
+  if (a === 169 && second === 254) return false;
+  if (a === 172 && second >= 16 && second <= 31) return false;
+  if (a === 192 && second === 168) return false;
+  if (a === 192 && second === 0 && b[2] === 0) return false;
+  if (a === 192 && second === 0 && b[2] === 2) return false;
+  if (a === 192 && b[1] === 88 && b[2] === 99) return false;
+  if (a === 198 && (second === 18 || second === 19)) return false;
+  if (a === 198 && second === 51 && b[2] === 100) return false;
+  if (a === 203 && second === 0 && b[2] === 113) return false;
+  return true;
+}
+function isV6GlobalUnicast(b) {
+  if ((b[0] & 224) !== 32) return false;
+  if (b[0] === 32 && b[1] === 1 && b[2] === 13 && b[3] === 184) return false;
+  return true;
+}
+function parseIpString(value) {
+  const s = String(value || "").trim();
+  if (s.includes(":")) {
+    return parseIpv6(s);
+  }
+  return parseIpv4(s);
+}
+function parseIpv4(s) {
+  const parts = s.split(".");
+  if (parts.length !== 4) return null;
+  const bytes = new Uint8Array(4);
+  for (let i = 0; i < 4; i += 1) {
+    const p = parts[i];
+    if (!/^(0|[1-9][0-9]{0,2})$/.test(p)) return null;
+    const n = Number(p);
+    if (n > 255) return null;
+    bytes[i] = n;
+  }
+  return { family: 1, bytes };
+}
+function parseIpv6(s) {
+  if (s.length === 0 || s.includes("%")) return null;
+  let address = s;
+  const lastColon = address.lastIndexOf(":");
+  const lastPart = lastColon >= 0 ? address.slice(lastColon + 1) : address;
+  let ipv4Tail = null;
+  let hasIpv4Tail = false;
+  if (lastPart.includes(".")) {
+    const v4 = parseIpv4(lastPart);
+    if (v4 === null) return null;
+    ipv4Tail = v4.bytes;
+    hasIpv4Tail = true;
+    address = `${address.slice(0, lastColon)}:v4`;
+  }
+  const halves = address.split("::");
+  if (halves.length > 2) return null;
+  const leftParts = halves[0] === "" ? [] : halves[0].split(":");
+  const rightParts = halves.length === 1 || halves[1] === "" ? [] : halves[1].split(":");
+  const parseParts = (arr) => {
+    const out = [];
+    for (const part of arr) {
+      if (part === "v4") {
+        if (!hasIpv4Tail) return null;
+        out.push(ipv4Tail[0] << 8 | ipv4Tail[1], ipv4Tail[2] << 8 | ipv4Tail[3]);
+      } else {
+        if (!/^[0-9a-fA-F]{1,4}$/.test(part)) return null;
+        out.push(parseInt(part, 16));
+      }
+    }
+    return out;
+  };
+  const left = parseParts(leftParts);
+  const right = parseParts(rightParts);
+  if (left === null || right === null) return null;
+  const hasCompression = halves.length === 2;
+  const missing = 8 - left.length - right.length;
+  if (!hasCompression && missing !== 0 || hasCompression && missing < 1) return null;
+  const words = [...left, ...new Array(missing).fill(0), ...right];
+  if (words.length !== 8) return null;
+  const bytes = new Uint8Array(16);
+  for (let i = 0; i < 8; i += 1) {
+    bytes[i * 2] = words[i] >>> 8 & 255;
+    bytes[i * 2 + 1] = words[i] & 255;
+  }
+  let mapped = true;
+  for (let i = 0; i < 10; i += 1) if (bytes[i] !== 0) mapped = false;
+  if (mapped && bytes[10] === 255 && bytes[11] === 255) {
+    return { family: 1, bytes: bytes.slice(12) };
+  }
+  return { family: 2, bytes };
+}
+function isGlobalUnicast(ip) {
+  return ip ? ip.family === 1 ? isIpv4GlobalUnicast(ip.bytes) : isV6GlobalUnicast(ip.bytes) : false;
+}
+function subnetForEcs(cfConnectingIp, ipv4Prefix, ipv6Prefix) {
+  if (!cfConnectingIp) return null;
+  const ip = parseIpString(cfConnectingIp);
+  if (ip === null || !isGlobalUnicast(ip)) return null;
+  const prefixLength = ip.family === 1 ? ipv4Prefix : ipv6Prefix;
+  const network = ip.bytes.slice();
+  const whole = Math.floor(prefixLength / 8);
+  const rem = prefixLength % 8;
+  if (rem !== 0) network[whole] = network[whole] & 255 << 8 - rem;
+  network.fill(0, whole + (rem === 0 ? 0 : 1));
+  return { family: ip.family, bytes: ip.bytes, network, prefixLength };
+}
+
+// src/cache.js
+var DEFAULT_SIZE = 1024;
+function createCache({ size = DEFAULT_SIZE, now = Date.now } = {}) {
+  const map = /* @__PURE__ */ new Map();
+  const key = (qname, qtype, ecs) => `${qname.toLowerCase()}|${qtype}|${ecs}`;
+  return {
+    /** Look up; returns answer bytes on fresh hit, else null. */
+    get(qname, qtype, ecs, ts = now()) {
+      const k = key(qname, qtype, ecs);
+      const e = map.get(k);
+      if (!e) return null;
+      if (e.expiresAt <= ts) {
+        map.delete(k);
+        return null;
+      }
+      return e.value;
+    },
+    /** Store an answer for `ttl` seconds. ttl <= 0 skips caching. */
+    set(qname, qtype, ecs, value, ttl, ts = now()) {
+      if (ttl <= 0) return;
+      const k = key(qname, qtype, ecs);
+      map.set(k, { value, expiresAt: ts + ttl * 1e3 });
+      while (map.size > size) {
+        const oldest = map.keys().next().value;
+        if (oldest === void 0) break;
+        map.delete(oldest);
+      }
+    },
+    /** Number of live entries (metrics). */
+    size() {
+      return map.size;
+    }
+  };
+}
+
+// src/core.js
+function appendEcsOpt(query, subnet) {
+  const rdata = encodeEcsRdata(subnet.family, subnet.network, subnet.prefixLength);
+  const option = wrapEcsOption(rdata);
+  const opt = new Uint8Array(1 + 2 + 2 + 4 + 2 + option.length);
+  opt[0] = 0;
+  opt[1] = 0;
+  opt[2] = 41;
+  opt[3] = 4;
+  opt[4] = 208;
+  opt[5] = 0;
+  opt[6] = 0;
+  opt[7] = 0;
+  opt[8] = 0;
+  opt[9] = option.length >> 8 & 255;
+  opt[10] = option.length & 255;
+  opt.set(option, 11);
+  const out = new Uint8Array(query.length + opt.length);
+  out.set(query, 0);
+  out.set(opt, query.length);
+  const oldAr = (query[10] << 8 | query[11]) & 65535;
+  const newAr = oldAr + 1;
+  out[10] = newAr >> 8 & 255;
+  out[11] = newAr & 255;
+  return out;
+}
+var dnsCache = createCache();
+async function resolveQuery(wireQuery, parsed, { clientIp, env, config }) {
+  const qname = parsed.question.name;
+  let rules = null;
+  try {
+    rules = await ensureRules(env);
+  } catch {
+    rules = null;
+  }
+  const domestic = isDomestic(qname, rules);
+  if (env.BLOCK_URL || env.BLOCK_KV) {
+    const blockRule = await ensureBlock(env);
+    if (isBlocked(qname, blockRule)) {
+      metrics.inc("filter_blocked");
+      const action = config.blockAction;
+      const meta = { "X-DoH-Filter": "blocked" };
+      if (action === "nxdomain") {
+        return { ok: true, answer: buildErrorResponse(wireQuery, 3, parsed.question), meta };
+      }
+      if (action === "zero") {
+        return { ok: true, answer: buildZeroResponse(wireQuery, parsed), meta };
+      }
+    }
+  }
+  const subnet = subnetForEcs(clientIp, config.ecsV4Prefix, config.ecsV6Prefix);
+  const ecsKey = subnet ? `${subnet.family}:${subnet.network.join(".")}` : "none";
+  const result = await resolveWithCache(parsed, wireQuery, subnet, ecsKey, domestic, config, env);
+  if (!result) return { ok: false };
+  let answer = result.answer;
+  if (result.cached) {
+    answer = answer.slice();
+    answer[0] = parsed.id >> 8 & 255;
+    answer[1] = parsed.id & 255;
+  } else if (config.dnssec) {
+    answer = answer.slice();
+  }
+  if (config.dnssec) {
+    applyRelayedDnssec(answer, clientRequestedDnssec(parsed));
+  }
+  return { ok: true, answer, meta: result.meta };
+}
+async function resolveWithCache(parsed, query, subnet, ecsKey, domestic, config, env) {
+  const qname = parsed.question.name;
+  const qtype = parsed.question.qtype;
+  if (config.cacheTtlSeconds > 0) {
+    const cached = dnsCache.get(qname, qtype, ecsKey);
+    if (cached) {
+      metrics.inc("cache_hit");
+      metrics.recordAnalyticsPoint(env, {
+        group: domestic ? "domestic" : "global",
+        winnerUrl: "cache",
+        durationMs: 0,
+        qtype,
+        rcode: "NOERROR",
+        cacheStatus: "hit"
+      });
+      return { answer: cached, from: "cache", durationMs: 0, cached: true };
+    }
+    metrics.inc("cache_miss");
+  }
+  const forwarded = subnet ? appendEcsOpt(query, subnet) : query;
+  const urls = domestic ? config.domesticUrls : config.globalUrls;
+  const result = await raceGroup(urls, forwarded, parsed, {
+    timeoutMs: config.upstreamTimeoutMs,
+    maxResponseBytes: config.maxResponseBytes,
+    on: ({ kind }) => {
+      if (kind === "ok") metrics.inc("upstream_ok");
+      else if (kind === "timeout") metrics.inc("upstream_timeouts");
+      else if (kind === "servfail") metrics.inc("upstream_servfail");
+      else metrics.inc("upstream_errors");
+    }
+  });
+  if (!result) return null;
+  metrics.recordUpstreamRace(domestic ? "domestic" : "global", result.from, result.durationMs);
+  metrics.recordAnalyticsPoint(env, {
+    group: domestic ? "domestic" : "global",
+    winnerUrl: result.from,
+    durationMs: result.durationMs,
+    qtype,
+    rcode: "NOERROR",
+    cacheStatus: "miss"
+  });
+  if (config.cacheTtlSeconds > 0) {
+    let ttl = answerTtlSeconds(result.answer, parsed);
+    const flags = result.answer[2] << 8 | result.answer[3];
+    const rcode = flags & 15;
+    const ancount = result.answer[6] << 8 | result.answer[7];
+    if (rcode === 3 || ancount === 0) {
+      const maxNegTtl = Math.min(config.cacheTtlSeconds, 30);
+      ttl = ttl <= 0 ? maxNegTtl : Math.min(ttl, maxNegTtl);
+    } else if (ttl <= 0) {
+      ttl = config.cacheTtlSeconds;
+    }
+    dnsCache.set(qname, qtype, ecsKey, result.answer, Math.min(ttl, config.cacheTtlSeconds));
+  }
+  return result;
+}
+
 // src/worker.js
 var QTYPE_STR = {
   A: 1,
@@ -2365,31 +2489,6 @@ async function readDnsQuery(request, config) {
   }
   return { error: "method_not_allowed" };
 }
-function appendEcsOpt(query, subnet) {
-  const rdata = encodeEcsRdata(subnet.family, subnet.network, subnet.prefixLength);
-  const option = wrapEcsOption(rdata);
-  const opt = new Uint8Array(1 + 2 + 2 + 4 + 2 + option.length);
-  opt[0] = 0;
-  opt[1] = 0;
-  opt[2] = 41;
-  opt[3] = 4;
-  opt[4] = 208;
-  opt[5] = 0;
-  opt[6] = 0;
-  opt[7] = 0;
-  opt[8] = 0;
-  opt[9] = option.length >> 8 & 255;
-  opt[10] = option.length & 255;
-  opt.set(option, 11);
-  const out = new Uint8Array(query.length + opt.length);
-  out.set(query, 0);
-  out.set(opt, query.length);
-  const oldAr = (query[10] << 8 | query[11]) & 65535;
-  const newAr = oldAr + 1;
-  out[10] = newAr >> 8 & 255;
-  out[11] = newAr & 255;
-  return out;
-}
 async function handleRequest(request, env) {
   const config = readConfig(env);
   metrics.inc("requests");
@@ -2464,57 +2563,17 @@ GitHub: https://github.com/dengyie/cf-doh
     metrics.inc("formerr");
     return dnsResponse(buildErrorResponse(read.query, 1, null));
   }
-  const outcome = await resolveAndRelay(read.query, parsed, request, env, config);
+  const outcome = await resolveQuery(read.query, parsed, {
+    clientIp: request.headers.get("cf-connecting-ip"),
+    env,
+    config
+  });
   if (!outcome.ok) {
     metrics.inc("servfail");
     return dnsResponse(serverFailure(read.query, parsed.question));
   }
   metrics.inc("ok");
   return dnsResponse(outcome.answer, outcome.meta);
-}
-async function resolveAndRelay(wireQuery, parsed, request, env, config) {
-  const qname = parsed.question.name;
-  let rules = null;
-  try {
-    rules = await ensureRules(env);
-  } catch {
-    rules = null;
-  }
-  const domestic = isDomestic(qname, rules);
-  if (env.BLOCK_URL || env.BLOCK_KV) {
-    const blockRule = await ensureBlock(env);
-    if (isBlocked(qname, blockRule)) {
-      metrics.inc("filter_blocked");
-      const action = config.blockAction;
-      const meta = { "X-DoH-Filter": "blocked" };
-      if (action === "nxdomain") {
-        return { ok: true, answer: buildErrorResponse(wireQuery, 3, parsed.question), meta };
-      }
-      if (action === "zero") {
-        return { ok: true, answer: buildZeroResponse(wireQuery, parsed), meta };
-      }
-    }
-  }
-  const subnet = subnetForEcs(
-    request.headers.get("cf-connecting-ip"),
-    config.ecsV4Prefix,
-    config.ecsV6Prefix
-  );
-  const ecsKey = subnet ? `${subnet.family}:${subnet.network.join(".")}` : "none";
-  const result = await resolveWithCache(parsed, wireQuery, subnet, ecsKey, domestic, config, env);
-  if (!result) return { ok: false };
-  let answer = result.answer;
-  if (result.cached) {
-    answer = answer.slice();
-    answer[0] = parsed.id >> 8 & 255;
-    answer[1] = parsed.id & 255;
-  } else if (config.dnssec) {
-    answer = answer.slice();
-  }
-  if (config.dnssec) {
-    applyRelayedDnssec(answer, clientRequestedDnssec(parsed));
-  }
-  return { ok: true, answer };
 }
 async function handleJsonQuery(request, url, env, config) {
   if (request.method !== "GET" && request.method !== "OPTIONS") {
@@ -2533,7 +2592,11 @@ async function handleJsonQuery(request, url, env, config) {
   } catch {
     return jsonResponse({ Status: 2, Question: [{ name: qname, type: typeName }] });
   }
-  const outcome = await resolveAndRelay(wireQuery, parsed, request, env, config);
+  const outcome = await resolveQuery(wireQuery, parsed, {
+    clientIp: request.headers.get("cf-connecting-ip"),
+    env,
+    config
+  });
   if (!outcome.ok) {
     return jsonResponse({ Status: 2, Question: [{ name: qname, type: typeName }] });
   }
@@ -2638,63 +2701,6 @@ async function handleRulesSync(request, url, env, config) {
       }
     );
   }
-}
-var dnsCache = createCache();
-async function resolveWithCache(parsed, query, subnet, ecsKey, domestic, config, env) {
-  const qname = parsed.question.name;
-  const qtype = parsed.question.qtype;
-  if (config.cacheTtlSeconds > 0) {
-    const cached = dnsCache.get(qname, qtype, ecsKey);
-    if (cached) {
-      metrics.inc("cache_hit");
-      metrics.recordAnalyticsPoint(env, {
-        group: domestic ? "domestic" : "global",
-        winnerUrl: "cache",
-        durationMs: 0,
-        qtype,
-        rcode: "NOERROR",
-        cacheStatus: "hit"
-      });
-      return { answer: cached, from: "cache", durationMs: 0, cached: true };
-    }
-    metrics.inc("cache_miss");
-  }
-  const forwarded = subnet ? appendEcsOpt(query, subnet) : query;
-  const urls = domestic ? config.domesticUrls : config.globalUrls;
-  const result = await raceGroup(urls, forwarded, parsed, {
-    timeoutMs: config.upstreamTimeoutMs,
-    maxResponseBytes: config.maxResponseBytes,
-    on: ({ kind }) => {
-      if (kind === "ok") metrics.inc("upstream_ok");
-      else if (kind === "timeout") metrics.inc("upstream_timeouts");
-      else if (kind === "servfail") metrics.inc("upstream_servfail");
-      else metrics.inc("upstream_errors");
-    }
-  });
-  if (!result) return null;
-  metrics.recordUpstreamRace(domestic ? "domestic" : "global", result.from, result.durationMs);
-  metrics.recordAnalyticsPoint(env, {
-    group: domestic ? "domestic" : "global",
-    winnerUrl: result.from,
-    durationMs: result.durationMs,
-    qtype,
-    rcode: "NOERROR",
-    cacheStatus: "miss"
-  });
-  if (config.cacheTtlSeconds > 0) {
-    let ttl = answerTtlSeconds(result.answer, parsed);
-    const flags = result.answer[2] << 8 | result.answer[3];
-    const rcode = flags & 15;
-    const ancount = result.answer[6] << 8 | result.answer[7];
-    if (rcode === 3 || ancount === 0) {
-      const maxNegTtl = Math.min(config.cacheTtlSeconds, 30);
-      ttl = ttl <= 0 ? maxNegTtl : Math.min(ttl, maxNegTtl);
-    } else if (ttl <= 0) {
-      ttl = config.cacheTtlSeconds;
-    }
-    dnsCache.set(qname, qtype, ecsKey, result.answer, Math.min(ttl, config.cacheTtlSeconds));
-  }
-  return result;
 }
 var worker_default = {
   async fetch(request, env) {
