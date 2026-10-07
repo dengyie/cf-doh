@@ -43,6 +43,8 @@ const check = (cond, label) => {
   }
 };
 
+import { createIpLimiter } from "../src/ratelimit.js";
+
 // ---- shared helpers ----------------------------------------------------------
 
 /** Minimal wire query: one question, RD=1 (same shape as test/routing.mjs). */
@@ -493,6 +495,21 @@ async function runLiveTests() {
       check(state.written.length === 80, "flow control: every pipelined query still gets an answer");
       await waitFor(() => state.resumeCalls >= 1, 1000);
       check(state.resumeCalls >= 1, "flow control: reading resumes after the in-flight drain");
+    }
+
+    // Per-IP rate limiter: queries beyond the bucket are dropped (not forwarded)
+    // and the inFlight counter must stay correct — a dropped query must never
+    // hold the connection paused.
+    {
+      const lim = createIpLimiter({ maxQpsPerIp: 1, maxConnectionsPerIp: 0 });
+      const { socket, state } = makeFakeSocket();
+      handleDotConnection(socket, { config: readConfig(env), env, clientAddress: "10.99.0.1", idleTimeoutMs: 5000, limiter: lim });
+      // 3 queries, bucket size 1 → only the first should be answered.
+      const qs = [buildQuery("example.net", 1, 0xaa01), buildQuery("example.net", 1, 0xaa02), buildQuery("example.net", 1, 0xaa03)];
+      state.handlers.data(Buffer.concat(qs.map(dotFrame)));
+      await waitFor(() => state.written.length >= 1, 2000);
+      check(state.written.length === 1, "rate limiter: only 1 of 3 queries forwarded (bucket exhausted)");
+      check(state.pauseCalls === 0, "rate limiter: no pause — inFlight counter non-leaking (regression guard)");
     }
 
     // CLI regression (review finding): a listener failure must exit non-zero so

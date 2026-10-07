@@ -24,6 +24,16 @@ const COUNTERS = {
   rules_unchanged: 0,
   rules_fetch_fail: 0,
   filter_blocked: 0,
+  // DoT entry point (src/dot.js) — declared up front so /health always lists them.
+  dot_connections: 0,
+  dot_rejected: 0,
+  dot_tls_errors: 0,
+  dot_idle_timeouts: 0,
+  dot_answer_errors: 0,
+  dot_write_errors: 0,
+  dot_frame_dropped: 0,
+  dot_socket_errors: 0,
+  dot_rate_limited: 0,
 };
 
 let startedAt = Date.now();

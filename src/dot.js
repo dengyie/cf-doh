@@ -22,7 +22,8 @@
  *                       --key  /etc/letsencrypt/live/dns.example.com/privkey.pem
  * Env:  DOT_PORT (853), DOT_HOST (0.0.0.0), DOT_TLS_CERT, DOT_TLS_KEY,
  *       DOT_IDLE_TIMEOUT_SECONDS (30), DOT_MAX_CONNECTIONS (128),
- *       DOT_REFRESH_SECONDS (21600) + every DOH_* variable read by config.js.
+ *       DOT_REFRESH_SECONDS (21600), DOT_MAX_QPS_PER_IP (50),
+ *       DOT_MAX_CONNECTIONS_PER_IP (16) + every DOH_* variable read by config.js.
  */
 
 import tls from "node:tls";
@@ -37,6 +38,7 @@ import { serverFailure } from "./resolver.js";
 import { metrics } from "./metrics.js";
 import { refreshRules } from "./rules.js";
 import { refreshBlock } from "./filter.js";
+import { createIpLimiter } from "./ratelimit.js";
 
 const RCODE_FORMERR = 1;
 const FRAME_HEADER_BYTES = 2; // RFC 7858 §3.2 length prefix
@@ -84,6 +86,7 @@ export class DotFramer {
       const total = FRAME_HEADER_BYTES + declared;
       if (declared < MIN_DNS_MESSAGE_BYTES || declared > this.maxMessageBytes) {
         if (this.pending.length >= total) {
+          metrics.inc("dot_frame_dropped");
           this.pending = this.pending.subarray(total);
           continue;
         }
@@ -130,6 +133,7 @@ function writeDotFrame(socket, message) {
     }
     socket.write(encodeDotFrame(message));
   } catch {
+    metrics.inc("dot_write_errors");
     /* client vanished mid-write; the error handler destroys the socket */
   }
 }
@@ -172,7 +176,7 @@ async function answerQuery(socket, query, { config, env, clientAddress }) {
  * Attach the DoT framing + answering logic to one connected (TLS) socket.
  * Exported for tests; the server below wires it automatically.
  */
-export function handleDotConnection(socket, { config, env, clientAddress, idleTimeoutMs }) {
+export function handleDotConnection(socket, { config, env, clientAddress, idleTimeoutMs, limiter }) {
   const framer = new DotFramer(config.maxQueryBytes);
   let inFlight = 0;
   let paused = false;
@@ -185,10 +189,21 @@ export function handleDotConnection(socket, { config, env, clientAddress, idleTi
       return;
     }
     for (const message of messages) {
+      // Per-source query budget: drop without answering when the bucket is empty.
+      if (limiter && !limiter.allowQuery(clientAddress)) {
+        metrics.inc("dot_rate_limited");
+        continue;
+      }
       // Pipelining (RFC 7766): resolve concurrently, never head-of-line block.
       inFlight += 1;
       answerQuery(socket, message, { config, env, clientAddress })
-        .catch(() => {})
+        .catch(() => {
+          // answerQuery is designed never to reject; if a future regression does,
+          // the connection is unhealthy — tear it down and count it so the
+          // failure is not invisible.
+          metrics.inc("dot_answer_errors");
+          socket.destroy();
+        })
         .finally(() => {
           inFlight -= 1;
           if (paused && inFlight < MAX_INFLIGHT_QUERIES_PER_CONNECTION) {
@@ -208,7 +223,13 @@ export function handleDotConnection(socket, { config, env, clientAddress, idleTi
     metrics.inc("dot_idle_timeouts");
     socket.destroy();
   });
-  socket.on("error", () => socket.destroy());
+  socket.on("error", () => {
+    // A peer resetting an idle connection (ECONNRESET) is routine; count it and
+    // tear the socket down. Never leave a socket error unhandled — that would
+    // throw and take down the process.
+    metrics.inc("dot_socket_errors");
+    socket.destroy();
+  });
 }
 
 /**
@@ -222,6 +243,7 @@ export function createDotServer({
   key,
   idleTimeoutMs = 30_000,
   maxConnections = 128,
+  limiter,
   logger = () => {},
 }) {
   let connections = 0;
@@ -238,13 +260,28 @@ export function createDotServer({
       }
       metrics.inc("dot_connections");
       const clientAddress = normalizeClientAddress(socket.remoteAddress);
+      // Per-source connection budget: a single abusive host cannot hold more
+      // than its share of the pool.
+      if (limiter && !limiter.acquireConnection(clientAddress)) {
+        metrics.inc("dot_rejected");
+        logger(`per-IP connection limit reached, rejecting ${clientAddress ?? socket.remoteAddress}`);
+        socket.destroy();
+        connections -= 1;
+        return;
+      }
       logger(`connection from ${clientAddress ?? socket.remoteAddress}:${socket.remotePort}`);
-      handleDotConnection(socket, { config, env, clientAddress, idleTimeoutMs });
+      handleDotConnection(socket, { config, env, clientAddress, idleTimeoutMs, limiter });
       socket.on("close", () => {
         connections -= 1;
+        limiter?.releaseConnection(clientAddress);
       });
     }
   );
+  // Cap the total number of sockets — including those still mid-TLS-handshake.
+  // The handler-level counter above only counts *validated* connections, so
+  // without this an attacker could open unlimited slow handshakes (each held up
+  // to handshakeTimeout) and exhaust descriptors.
+  server.maxConnections = maxConnections + 32;
   server.on("tlsClientError", (err) => {
     metrics.inc("dot_tls_errors");
     logger(`tls handshake failed: ${err.message}`);
@@ -259,9 +296,13 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === "--help" || a === "-h") args.help = true;
+    else if (a.startsWith("--port=")) args.port = a.slice("--port=".length);
     else if (a === "--port") args.port = argv[++i];
+    else if (a.startsWith("--host=")) args.host = a.slice("--host=".length);
     else if (a === "--host") args.host = argv[++i];
+    else if (a.startsWith("--cert=")) args.cert = a.slice("--cert=".length);
     else if (a === "--cert") args.cert = argv[++i];
+    else if (a.startsWith("--key=")) args.key = a.slice("--key=".length);
     else if (a === "--key") args.key = argv[++i];
     else if (a.startsWith("--")) {
       throw new Error(`unknown option: ${a}`);
@@ -285,7 +326,10 @@ function usage() {
     "  --host <addr>   bind address (default 0.0.0.0 / $DOT_HOST)",
     "",
     "DoT-specific env: DOT_TLS_CERT, DOT_TLS_KEY, DOT_PORT, DOT_HOST,",
-    "  DOT_IDLE_TIMEOUT_SECONDS (30), DOT_MAX_CONNECTIONS (128), DOT_REFRESH_SECONDS (21600).",
+    "  DOT_IDLE_TIMEOUT_SECONDS (30), DOT_MAX_CONNECTIONS (128), DOT_REFRESH_SECONDS (21600),",
+    "  DOT_MAX_QPS_PER_IP (50), DOT_MAX_CONNECTIONS_PER_IP (16). Set either to 0 to disable.",
+    "  This listener has no client authentication (RFC 7858 carries none): restrict it at",
+    "  the network layer when your clients have stable addresses.",
     "Resolver env (shared with the Worker): DOH_PATH is ignored here; see README —",
     "  DOMESTIC_DOH_URL, GLOBAL_DOH_URL, RULES_URL, ECS_IPV4_PREFIX, CACHE_TTL_SECONDS, ...",
   ].join("\n");
@@ -347,6 +391,12 @@ export function main(argv = process.argv.slice(2), env = process.env) {
   const idleTimeoutMs = parseUint(env.DOT_IDLE_TIMEOUT_SECONDS, 30, 5, 86400) * 1000;
   const maxConnections = parseUint(env.DOT_MAX_CONNECTIONS, 128, 1, 65536);
   const refreshSeconds = parseUint(env.DOT_REFRESH_SECONDS, 21600, 60, 7 * 86400);
+  const maxQpsPerIp = parseUint(env.DOT_MAX_QPS_PER_IP, 50, 0, 10000);
+  const maxConnPerIp = parseUint(env.DOT_MAX_CONNECTIONS_PER_IP, 16, 0, 1000);
+
+  const limiter = maxQpsPerIp > 0 || maxConnPerIp > 0
+    ? createIpLimiter({ maxQpsPerIp, maxConnectionsPerIp: maxConnPerIp })
+    : null;
 
   const server = createDotServer({
     config,
@@ -355,6 +405,7 @@ export function main(argv = process.argv.slice(2), env = process.env) {
     key,
     idleTimeoutMs,
     maxConnections,
+    limiter,
     logger: defaultLogger,
   });
   server.on("error", (err) => {

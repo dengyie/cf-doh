@@ -14,6 +14,8 @@
  * fetch, and the cron refresh keeps both in sync.
  */
 
+import { parseRuleText, matchesRule } from "./matcher.js";
+
 const DEC = new TextDecoder("latin1");
 const ENC = new TextEncoder();
 
@@ -35,13 +37,6 @@ export const BUILTIN_OVERRIDE = [
   "githubusercontent.com",
   "githubassets.com",
 ];
-
-function parseBuiltinOverride() {
-  const plain = [];
-  for (const d of BUILTIN_OVERRIDE) plain.push(d.toLowerCase());
-  plain.sort();
-  return { plain, full: new Set(), regexp: [], version: 0 };
-}
 
 const KV_KEY = "rules:data";
 const KV_MAX_BYTES = 8 * 1024 * 1024;
@@ -70,60 +65,11 @@ function inFailureWindow() {
   return Date.now() < failUntil;
 }
 
-function parseRuleText(text) {
-  const plain = [];
-  const plainSet = new Set();
-  const full = new Set();
-  const regexp = [];
-  for (const raw of text.split("\n")) {
-    const line = raw.trim();
-    if (!line || line.startsWith("#") || line.startsWith("//")) continue;
-    if (line.startsWith("full:")) {
-      const d = line.slice(5).trim().toLowerCase();
-      if (d) full.add(d);
-    } else if (line.startsWith("regexp:")) {
-      const d = line.slice(7).trim();
-      if (d) regexp.push(new RegExp(d, "i"));
-    } else {
-      const d = line.toLowerCase();
-      plain.push(d);
-      plainSet.add(d);
-    }
-  }
-  // Sort for determinism; not required for correctness of suffix matching,
-  // but it keeps iterations cache-friendly and test assertions stable.
-  plain.sort();
-  return { plain, plainSet, full, regexp, version: text.length };
-}
-
 function matchesRules(qname, rules) {
   const q = qname.toLowerCase();
   // Built-in personal override always wins.
   if (matchesBuiltin(q)) return true;
-  if (!rules) return false;
-  if (rules.full && rules.full.has(q)) return true;
-
-  if (rules.plainSet) {
-    if (rules.plainSet.has(q)) return true;
-    let dotIdx = q.indexOf(".");
-    while (dotIdx !== -1) {
-      const parent = q.slice(dotIdx + 1);
-      if (rules.plainSet.has(parent)) return true;
-      dotIdx = q.indexOf(".", dotIdx + 1);
-    }
-  } else if (rules.plain) {
-    for (let i = 0; i < rules.plain.length; i += 1) {
-      const p = rules.plain[i];
-      if (q === p || q.endsWith(`.${p}`)) return true;
-    }
-  }
-
-  if (rules.regexp) {
-    for (let i = 0; i < rules.regexp.length; i += 1) {
-      if (rules.regexp[i].test(q)) return true;
-    }
-  }
-  return false;
+  return matchesRule(qname, rules);
 }
 
 /** Const-fold the builtin override so it never allocates per-query. */

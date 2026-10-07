@@ -67,5 +67,19 @@ const check = (cond, label) => {
   check(c.get("c", 1, "none") !== null && c.get("b", 1, "none") !== null, "newer entries retained");
 }
 
+// ---- LRU semantics: re-setting a key moves it to the back (review finding F8) ----
+{
+  const c = createCache({ now, size: 2 });
+  c.set("hot", 1, "none", new Uint8Array([1]), 60);
+  c.set("cold", 1, "none", new Uint8Array([2]), 60);
+  // Re-set "hot" — must move it to the end of insertion order so the next
+  // insert evicts "cold", NOT the hottest entry.
+  c.set("hot", 1, "none", new Uint8Array([3]), 60);
+  c.set("new", 1, "none", new Uint8Array([4]), 60);
+  check(c.get("hot", 1, "none") !== null, "LRU: re-set hot entry survives eviction");
+  check(c.get("cold", 1, "none") === null, "LRU: least-recently-set entry evicted");
+  check(c.get("new", 1, "none") !== null, "LRU: newest entry retained");
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exitCode = failed > 0 ? 1 : 0;

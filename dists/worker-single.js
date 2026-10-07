@@ -321,29 +321,7 @@ function answerTtlSeconds(buf, info) {
   return minTtl === Infinity ? 0 : minTtl;
 }
 
-// src/rules.js
-var DEC = new TextDecoder("latin1");
-var ENC = new TextEncoder();
-var DEFAULT_RULES_URL = "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/direct-list.txt";
-var BUILTIN_OVERRIDE = [
-  "linux.do",
-  // 主论坛及子域
-  "github.com",
-  "githubusercontent.com",
-  "githubassets.com"
-];
-var KV_KEY = "rules:data";
-var KV_MAX_BYTES = 8 * 1024 * 1024;
-var FAIL_COOLDOWN_MS = 3e4;
-var failUntil = 0;
-var live = null;
-var coldInflight = null;
-function noteFailure() {
-  failUntil = Date.now() + FAIL_COOLDOWN_MS;
-}
-function inFailureWindow() {
-  return Date.now() < failUntil;
-}
+// src/matcher.js
 function parseRuleText(text) {
   const plain = [];
   const plainSet = /* @__PURE__ */ new Set();
@@ -367,31 +345,59 @@ function parseRuleText(text) {
   plain.sort();
   return { plain, plainSet, full, regexp, version: text.length };
 }
-function matchesRules(qname, rules) {
+function matchesRule(qname, rule) {
   const q = qname.toLowerCase();
-  if (matchesBuiltin(q)) return true;
-  if (!rules) return false;
-  if (rules.full && rules.full.has(q)) return true;
-  if (rules.plainSet) {
-    if (rules.plainSet.has(q)) return true;
+  if (!rule) return false;
+  if (rule.full && rule.full.has(q)) return true;
+  if (rule.plainSet) {
+    if (rule.plainSet.has(q)) return true;
     let dotIdx = q.indexOf(".");
     while (dotIdx !== -1) {
       const parent = q.slice(dotIdx + 1);
-      if (rules.plainSet.has(parent)) return true;
+      if (rule.plainSet.has(parent)) return true;
       dotIdx = q.indexOf(".", dotIdx + 1);
     }
-  } else if (rules.plain) {
-    for (let i = 0; i < rules.plain.length; i += 1) {
-      const p = rules.plain[i];
+  } else if (rule.plain) {
+    for (let i = 0; i < rule.plain.length; i += 1) {
+      const p = rule.plain[i];
       if (q === p || q.endsWith(`.${p}`)) return true;
     }
   }
-  if (rules.regexp) {
-    for (let i = 0; i < rules.regexp.length; i += 1) {
-      if (rules.regexp[i].test(q)) return true;
+  if (rule.regexp) {
+    for (let i = 0; i < rule.regexp.length; i += 1) {
+      if (rule.regexp[i].test(q)) return true;
     }
   }
   return false;
+}
+
+// src/rules.js
+var DEC = new TextDecoder("latin1");
+var ENC = new TextEncoder();
+var DEFAULT_RULES_URL = "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/direct-list.txt";
+var BUILTIN_OVERRIDE = [
+  "linux.do",
+  // 主论坛及子域
+  "github.com",
+  "githubusercontent.com",
+  "githubassets.com"
+];
+var KV_KEY = "rules:data";
+var KV_MAX_BYTES = 8 * 1024 * 1024;
+var FAIL_COOLDOWN_MS = 3e4;
+var failUntil = 0;
+var live = null;
+var coldInflight = null;
+function noteFailure() {
+  failUntil = Date.now() + FAIL_COOLDOWN_MS;
+}
+function inFailureWindow() {
+  return Date.now() < failUntil;
+}
+function matchesRules(qname, rules) {
+  const q = qname.toLowerCase();
+  if (matchesBuiltin(q)) return true;
+  return matchesRule(qname, rules);
 }
 var BUILTIN = new Set(BUILTIN_OVERRIDE.map((d) => d.toLowerCase()));
 function matchesBuiltin(q) {
@@ -510,54 +516,8 @@ var ENC2 = new TextEncoder();
 var KV_KEY2 = "block:data";
 var live2 = null;
 var coldInflight2 = null;
-function parseRuleText2(text) {
-  const plain = [];
-  const plainSet = /* @__PURE__ */ new Set();
-  const full = /* @__PURE__ */ new Set();
-  const regexp = [];
-  for (const raw of text.split("\n")) {
-    const line = raw.trim();
-    if (!line || line.startsWith("#") || line.startsWith("//")) continue;
-    if (line.startsWith("full:")) {
-      full.add(line.slice(5).trim().toLowerCase());
-    } else if (line.startsWith("regexp:")) {
-      regexp.push(new RegExp(line.slice(7).trim(), "i"));
-    } else {
-      const d = line.toLowerCase();
-      plain.push(d);
-      plainSet.add(d);
-    }
-  }
-  plain.sort();
-  return { plain, plainSet, full, regexp, version: text.length };
-}
-function matches(qname, rule) {
-  const q = qname.toLowerCase();
-  if (!rule) return false;
-  if (rule.full && rule.full.has(q)) return true;
-  if (rule.plainSet) {
-    if (rule.plainSet.has(q)) return true;
-    let dotIdx = q.indexOf(".");
-    while (dotIdx !== -1) {
-      const parent = q.slice(dotIdx + 1);
-      if (rule.plainSet.has(parent)) return true;
-      dotIdx = q.indexOf(".", dotIdx + 1);
-    }
-  } else if (rule.plain) {
-    for (let i = 0; i < rule.plain.length; i += 1) {
-      const p = rule.plain[i];
-      if (q === p || q.endsWith(`.${p}`)) return true;
-    }
-  }
-  if (rule.regexp) {
-    for (let i = 0; i < rule.regexp.length; i += 1) {
-      if (rule.regexp[i].test(q)) return true;
-    }
-  }
-  return false;
-}
 function isBlocked(qname, rule) {
-  return matches(qname, rule);
+  return matchesRule(qname, rule);
 }
 var disabled = false;
 async function ensureBlock(env, fetcher = fetch) {
@@ -569,7 +529,7 @@ async function ensureBlock(env, fetcher = fetch) {
       if (raw) {
         const bytes = typeof raw === "string" ? ENC2.encode(raw) : raw;
         const text = DEC2.decode(bytes);
-        live2 = { ...parseRuleText2(text), data: text };
+        live2 = { ...parseRuleText(text), data: text };
         return live2;
       }
     } catch {
@@ -589,7 +549,7 @@ async function ensureBlock(env, fetcher = fetch) {
         if (ct.includes("text/html")) return null;
         const buf = await resp.arrayBuffer();
         const text = DEC2.decode(buf);
-        const rule = parseRuleText2(text);
+        const rule = parseRuleText(text);
         live2 = { ...rule, data: text };
         if (env.BLOCK_KV) {
           try {
@@ -622,7 +582,7 @@ async function refreshBlock(env, fetcher = fetch) {
     if (ct.includes("text/html")) return false;
     const buf = await resp.arrayBuffer();
     const text = DEC2.decode(buf);
-    live2 = { ...parseRuleText2(text), data: text };
+    live2 = { ...parseRuleText(text), data: text };
     if (env.BLOCK_KV) {
       try {
         await env.BLOCK_KV.put(KV_KEY2, new Uint8Array(buf));
@@ -930,7 +890,17 @@ var COUNTERS = {
   rules_fetch: 0,
   rules_unchanged: 0,
   rules_fetch_fail: 0,
-  filter_blocked: 0
+  filter_blocked: 0,
+  // DoT entry point (src/dot.js) — declared up front so /health always lists them.
+  dot_connections: 0,
+  dot_rejected: 0,
+  dot_tls_errors: 0,
+  dot_idle_timeouts: 0,
+  dot_answer_errors: 0,
+  dot_write_errors: 0,
+  dot_frame_dropped: 0,
+  dot_socket_errors: 0,
+  dot_rate_limited: 0
 };
 var startedAt = Date.now();
 var UPSTREAM_WINS = {};
@@ -2256,6 +2226,7 @@ function createCache({ size = DEFAULT_SIZE, now = Date.now } = {}) {
     set(qname, qtype, ecs, value, ttl, ts = now()) {
       if (ttl <= 0) return;
       const k = key(qname, qtype, ecs);
+      map.delete(k);
       map.set(k, { value, expiresAt: ts + ttl * 1e3 });
       while (map.size > size) {
         const oldest = map.keys().next().value;

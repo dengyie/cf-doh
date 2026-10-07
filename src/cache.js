@@ -36,8 +36,12 @@ export function createCache({ size = DEFAULT_SIZE, now = Date.now } = {}) {
     set(qname, qtype, ecs, value, ttl, ts = now()) {
       if (ttl <= 0) return;
       const k = key(qname, qtype, ecs);
+      // Re-insert to move to end of insertion order — Map.set on an existing key
+      // keeps its original position, which would make eviction FIFO and drop
+      // the most frequently-cached entries first.
+      map.delete(k);
       map.set(k, { value, expiresAt: ts + ttl * 1000 });
-      // Bound size (evict oldest = first inserted).
+      // Bound size: evict the least-recently-reinserted entry.
       while (map.size > size) {
         const oldest = map.keys().next().value;
         if (oldest === undefined) break;

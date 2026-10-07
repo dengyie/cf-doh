@@ -112,7 +112,7 @@ function parseIpv6(s) {
     bytes[i * 2] = (words[i] >>> 8) & 0xff;
     bytes[i * 2 + 1] = words[i] & 0xff;
   }
-  // 1.0.1.1 -> IPv4-mapped check
+  // ::ffff:x.x.x.x → IPv4-mapped check
   let mapped = true;
   for (let i = 0; i < 10; i += 1) if (bytes[i] !== 0) mapped = false;
   if (mapped && bytes[10] === 0xff && bytes[11] === 0xff) {

@@ -125,7 +125,6 @@ export function parseDnsMessage(buf) {
     questionEnd,
   };
 
-  // Re-scan the question name for the rule matcher (we stored it above).
   // Find OPT in the additional section: the LAST additional RR, type 41.
   const ancount = readU16(buf, 6);
   const nscount = readU16(buf, 8);
@@ -211,44 +210,6 @@ export function buildErrorResponse(fromBuf, rcode, question) {
     full.set(fromBuf.subarray(question.questionStart, question.questionEnd), HEADER_LEN);
     return full;
   }
-  return out;
-}
-
-/**
- * Clone an incoming message, replacing/removing the EDNS OPT block with one
- * that carries a single ECS option. This is a small in-place technique: we
- * rebuild only the addional section. Since it is rare to have other EDNS
- * options, we drop them (they are not something a stub needs for resolution).
- * Returns a NEW message (does not mutate input).
- */
-export function replaceOptWithEcs(buf, info, ecsOption) {
-  // We rebuild the whole message up to questionEnd, then the opt.
-  const prefix = buf.subarray(0, info.question.questionEnd);
-  if (info.opt === null && ecsOption === null) return buf;
-
-  const opt = buildOptRdata(ecsOption); // may be null if no ecs
-  if (info.opt === null && opt === null) return buf;
-
-  const optRecord = buildOptRecord(opt); // type 41 RR
-  const newArCount = (info.opt === null ? 0 : info.additionalCount - 1) + 1;
-  const out = new Uint8Array(prefix.length + optRecord.length);
-  out.set(prefix, 0);
-  out.set(optRecord, prefix.length);
-  writeU16(out, HDR_ARCOUNT, newArCount);
-  return out;
-}
-
-/** Build the full OPT RR (name=root 0x00, type 41, class=UDP size, ttl, rdata). */
-function buildOptRecord(rdata) {
-  const rd = rdata ?? new Uint8Array(0);
-  const len = 1 + 2 + 2 + 4 + 2 + rd.length; // 0x00 + type + class + ttl + rdlength + rdata
-  const out = new Uint8Array(len);
-  out[0] = 0; // root name
-  writeU16(out, 1, 41); // type OPT
-  writeU16(out, 3, 1232); // class = max UDP payload
-  writeU32(out, 5, 0); // extended rcode / version = 0
-  writeU16(out, 9, rd.length);
-  out.set(rd, 11);
   return out;
 }
 
