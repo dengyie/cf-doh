@@ -100,10 +100,7 @@ export async function resolveQuery(wireQuery, parsed, { clientIp, env, config })
 
   // ECS injection from the trusted client IP.
   const subnet = subnetForEcs(clientIp, config.ecsV4Prefix, config.ecsV6Prefix);
-  // [...subnet.network] instead of subnet.network.join("."): TypedArray.prototype.join
-  // is ES2023 and missing on some Workers V8 builds; plain array spread + join is safe
-  // everywhere and the JIT collapses it to the same code.
-  const ecsKey = subnet ? `${subnet.family}:${[...subnet.network].join(".")}` : "none";
+  const ecsKey = subnet ? `${subnet.family}:${subnet.network.join(".")}` : "none";
   const result = await resolveWithCache(parsed, wireQuery, subnet, ecsKey, domestic, config, env);
   if (!result) return { ok: false };
 

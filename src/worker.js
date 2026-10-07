@@ -21,14 +21,12 @@ import {
   parseDnsMessage,
 } from "./dns.js";
 import { refreshRules, resetRules, adoptRawRules } from "./rules.js";
-import { refreshBlock, isBlocked, resetBlock as resetBlockFn } from "./filter.js";
+import { refreshBlock, resetBlock as resetBlockFn } from "./filter.js";
 import { jsonResponse, toJsonResponse } from "./jsonapi.js";
 import { serverFailure } from "./resolver.js";
 import { metrics } from "./metrics.js";
 import { renderLandingHtml } from "./landing.js";
 import { resolveQuery } from "./core.js";
-
-export { parseDnsMessage, DNS_CONTENT_TYPE };
 
 // Type name → QTYPE number, for the DoH JSON API (?type=..).
 const QTYPE_STR = {

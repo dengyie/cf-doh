@@ -2305,7 +2305,7 @@ async function resolveQuery(wireQuery, parsed, { clientIp, env, config }) {
     }
   }
   const subnet = subnetForEcs(clientIp, config.ecsV4Prefix, config.ecsV6Prefix);
-  const ecsKey = subnet ? `${subnet.family}:${[...subnet.network].join(".")}` : "none";
+  const ecsKey = subnet ? `${subnet.family}:${subnet.network.join(".")}` : "none";
   const result = await resolveWithCache(parsed, wireQuery, subnet, ecsKey, domestic, config, env);
   if (!result) return { ok: false };
   let answer = result.answer;
@@ -2701,9 +2701,7 @@ var worker_default = {
   }
 };
 export {
-  DNS_CONTENT_TYPE,
   worker_default as default,
   handleRequest,
-  parseDnsMessage,
   resetBlock
 };

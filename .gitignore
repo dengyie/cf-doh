@@ -13,3 +13,6 @@ dist/
 wrangler.*.jsonc
 wrangler.*.toml
 wrangler.*.json
+
+# 本机部署测试用的证书与临时产物（绝不入库）
+.local-test/
