@@ -23,7 +23,8 @@
  * Env:  DOT_PORT (853), DOT_HOST (0.0.0.0), DOT_TLS_CERT, DOT_TLS_KEY,
  *       DOT_IDLE_TIMEOUT_SECONDS (30), DOT_MAX_CONNECTIONS (128),
  *       DOT_REFRESH_SECONDS (21600), DOT_MAX_QPS_PER_IP (50),
- *       DOT_MAX_CONNECTIONS_PER_IP (16) + every DOH_* variable read by config.js.
+ *       DOT_MAX_CONNECTIONS_PER_IP (16), DOT_STATS_SECONDS (60) +
+ *       every DOH_* variable read by config.js.
  */
 
 import tls from "node:tls";
@@ -39,6 +40,11 @@ import { metrics } from "./metrics.js";
 import { refreshRules } from "./rules.js";
 import { refreshBlock } from "./filter.js";
 import { createIpLimiter } from "./ratelimit.js";
+
+/** Stable JSON log-line builder for metrics (exported for tests). */
+export function formatStatsLine(snapshot, extra = {}) {
+  return `stats ${JSON.stringify({ ...snapshot, ...extra })}`;
+}
 
 const RCODE_FORMERR = 1;
 const FRAME_HEADER_BYTES = 2; // RFC 7858 §3.2 length prefix
@@ -327,9 +333,9 @@ function usage() {
     "",
     "DoT-specific env: DOT_TLS_CERT, DOT_TLS_KEY, DOT_PORT, DOT_HOST,",
     "  DOT_IDLE_TIMEOUT_SECONDS (30), DOT_MAX_CONNECTIONS (128), DOT_REFRESH_SECONDS (21600),",
-    "  DOT_MAX_QPS_PER_IP (50), DOT_MAX_CONNECTIONS_PER_IP (16). Set either to 0 to disable.",
-    "  This listener has no client authentication (RFC 7858 carries none): restrict it at",
-    "  the network layer when your clients have stable addresses.",
+    "  DOT_MAX_QPS_PER_IP (50), DOT_MAX_CONNECTIONS_PER_IP (16),",
+    "  DOT_STATS_SECONDS (60, 0=off). Each is independently disabled by setting to 0.",
+    "  No client auth (RFC 7858): per-IP rate limiting is the primary guard.",
     "Resolver env (shared with the Worker): DOH_PATH is ignored here; see README —",
     "  DOMESTIC_DOH_URL, GLOBAL_DOH_URL, RULES_URL, ECS_IPV4_PREFIX, CACHE_TTL_SECONDS, ...",
   ].join("\n");
@@ -398,6 +404,20 @@ export function main(argv = process.argv.slice(2), env = process.env) {
     ? createIpLimiter({ maxQpsPerIp, maxConnectionsPerIp: maxConnPerIp })
     : null;
 
+  // Periodic metrics summary for journalctl-based observability. Set
+  // DOT_STATS_SECONDS=0 to disable. The timer is unref'd so it never keeps
+  // the process alive; the final dump on shutdown covers the last interval.
+  const statsSeconds = parseUint(env.DOT_STATS_SECONDS, 60, 0, 86400);
+  const logStats = () => {
+    const extra = limiter ? { dot_limiter_ips: limiter.size() } : {};
+    defaultLogger(formatStatsLine(metrics.snapshot(), extra));
+  };
+  let statsTimer = null;
+  if (statsSeconds > 0) {
+    statsTimer = setInterval(logStats, statsSeconds * 1000);
+    statsTimer.unref();
+  }
+
   const server = createDotServer({
     config,
     env,
@@ -446,6 +466,7 @@ export function main(argv = process.argv.slice(2), env = process.env) {
   const shutdown = (signal) => {
     defaultLogger(`${signal} received, closing listener...`);
     clearInterval(refreshTimer);
+    if (statsTimer) { clearInterval(statsTimer); logStats(); }
     server.close(() => process.exit(0));
     // Don't hang on lingering client sockets; in-flight queries finish or the
     // process exits after the grace period.

@@ -17,6 +17,7 @@
  *     ECS injection from the socket-derived client address.
  *  8. CLI regression: a listener failure (EADDRINUSE) exits 1 instead of
  *     hanging, so a systemd Restart=always unit can recover.
+ *  9. formatStatsLine: stable JSON log line (observability round-2 fix).
  *
  * Run: node test/dot.test.mjs   (part of npm test)
  */
@@ -27,6 +28,7 @@ import tls from "node:tls";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { formatStatsLine } from "../src/dot.js";
 
 const dir = dirname(fileURLToPath(import.meta.url));
 const here = (p) => join(dir, p);
@@ -530,6 +532,16 @@ async function runLiveTests() {
         "listen failure (EADDRINUSE) exits 1 instead of hanging"
       );
       blocker.close();
+    }
+
+    // Observability (round-2 fix): the stats log line is stable JSON that
+    // journalctl can grep; extra fields (limiter IP count) merge cleanly.
+    {
+      const line = formatStatsLine({ requests: 42, ok: 40 }, { dot_limiter_ips: 3 });
+      check(line.startsWith("stats "), "stats line: 'stats' prefix for journalctl grep");
+      const parsed = JSON.parse(line.slice("stats ".length));
+      check(parsed.requests === 42 && parsed.ok === 40 && parsed.dot_limiter_ips === 3,
+        "stats line: snapshot + extra merged into one JSON object");
     }
   } finally {
     server.close();

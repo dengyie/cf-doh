@@ -38,6 +38,12 @@ const COUNTERS = {
 
 let startedAt = Date.now();
 
+// Canonical counter names. inc() refuses (with a one-shot warning) to silently
+// accept a typo'd name — a misspelled counter would otherwise just vanish from
+// /health and never be seen again.
+const KNOWN = new Set(Object.keys(COUNTERS));
+const UNKNOWN_WARNED = new Set();
+
 // Upstream win tracker: hostname -> win count
 const UPSTREAM_WINS = {};
 
@@ -49,7 +55,14 @@ const LATENCY_SAMPLES = {
 };
 
 export function inc(name, n = 1) {
-  COUNTERS[name] = (COUNTERS[name] || 0) + n;
+  if (!Object.hasOwn(COUNTERS, name)) {
+    if (!UNKNOWN_WARNED.has(name)) {
+      UNKNOWN_WARNED.add(name);
+      console.warn(`[metrics] unknown counter incremented: ${name}`);
+    }
+    COUNTERS[name] = 0; // register so the value is at least visible in snapshots
+  }
+  COUNTERS[name] += n;
 }
 
 export function snapshot() {
@@ -431,10 +444,14 @@ export function healthResponse(config) {
 }
 
 export function resetMetrics() {
-  for (const k of Object.keys(COUNTERS)) COUNTERS[k] = 0;
+  for (const k of Object.keys(COUNTERS)) {
+    if (KNOWN.has(k)) COUNTERS[k] = 0;
+    else delete COUNTERS[k]; // drop counters added by a typo'd inc()
+  }
   for (const k of Object.keys(UPSTREAM_WINS)) delete UPSTREAM_WINS[k];
   LATENCY_SAMPLES.domestic.length = 0;
   LATENCY_SAMPLES.global.length = 0;
+  UNKNOWN_WARNED.clear();
   startedAt = Date.now();
 }
 

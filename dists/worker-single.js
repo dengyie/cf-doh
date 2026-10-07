@@ -205,7 +205,7 @@ function buildErrorResponse(fromBuf, rcode, question) {
   const rd = reqFlags & 256;
   const flags = 32768 | reqFlags & 30720 | rd | 128 | rcode & 15;
   writeU16(out, HDR_FLAGS, flags);
-  writeU16(out, HDR_QDCOUNT, 1);
+  writeU16(out, HDR_QDCOUNT, question ? 1 : 0);
   writeU16(out, 6, 0);
   writeU16(out, 8, 0);
   writeU16(out, HDR_ARCOUNT, 0);
@@ -903,6 +903,8 @@ var COUNTERS = {
   dot_rate_limited: 0
 };
 var startedAt = Date.now();
+var KNOWN = new Set(Object.keys(COUNTERS));
+var UNKNOWN_WARNED = /* @__PURE__ */ new Set();
 var UPSTREAM_WINS = {};
 var MAX_SAMPLES = 300;
 var LATENCY_SAMPLES = {
@@ -910,7 +912,14 @@ var LATENCY_SAMPLES = {
   global: []
 };
 function inc(name, n = 1) {
-  COUNTERS[name] = (COUNTERS[name] || 0) + n;
+  if (!Object.hasOwn(COUNTERS, name)) {
+    if (!UNKNOWN_WARNED.has(name)) {
+      UNKNOWN_WARNED.add(name);
+      console.warn(`[metrics] unknown counter incremented: ${name}`);
+    }
+    COUNTERS[name] = 0;
+  }
+  COUNTERS[name] += n;
 }
 function snapshot() {
   return { ...COUNTERS };
@@ -1251,10 +1260,14 @@ function healthResponse(config) {
   });
 }
 function resetMetrics() {
-  for (const k of Object.keys(COUNTERS)) COUNTERS[k] = 0;
+  for (const k of Object.keys(COUNTERS)) {
+    if (KNOWN.has(k)) COUNTERS[k] = 0;
+    else delete COUNTERS[k];
+  }
   for (const k of Object.keys(UPSTREAM_WINS)) delete UPSTREAM_WINS[k];
   LATENCY_SAMPLES.domestic.length = 0;
   LATENCY_SAMPLES.global.length = 0;
+  UNKNOWN_WARNED.clear();
   startedAt = Date.now();
 }
 var metrics = {
@@ -2292,7 +2305,7 @@ async function resolveQuery(wireQuery, parsed, { clientIp, env, config }) {
     }
   }
   const subnet = subnetForEcs(clientIp, config.ecsV4Prefix, config.ecsV6Prefix);
-  const ecsKey = subnet ? `${subnet.family}:${subnet.network.join(".")}` : "none";
+  const ecsKey = subnet ? `${subnet.family}:${[...subnet.network].join(".")}` : "none";
   const result = await resolveWithCache(parsed, wireQuery, subnet, ecsKey, domestic, config, env);
   if (!result) return { ok: false };
   let answer = result.answer;

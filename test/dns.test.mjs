@@ -75,11 +75,21 @@ function buildQuery(name, qtype = 1, qclass = 1, id = 0x1234) {
 // buildErrorResponse --------------------------------------------------------------
 {
   const q = buildQuery("github.com");
-  const err = buildErrorResponse(q, 2, null);
-  assert(err.byteLength === 12, "SERVFAIL minimal is 12 bytes");
-  const flags = (err[2] << 8) | err[3];
-  assert((flags & 0x8000) !== 0, "QR set in error response");
-  assert((flags & 0x000f) === 2, "rcode=2 (SERVFAIL)");
+  // FORMERR with null question: no question to echo, QDCOUNT must be 0.
+  const err = buildErrorResponse(q, 1, null);
+  assert(err.byteLength === 12, "FORMERR without question is 12-byte header");
+  const qdcount = (err[4] << 8) | err[5];
+  assert(qdcount === 0, "FORMERR without question: QDCOUNT=0");
+  // With a valid question: echoed verbatim, QDCOUNT=1.
+  const parsed = parseDnsMessage(q);
+  const withQ = buildErrorResponse(q, 2, parsed.question);
+  assert(withQ.byteLength === 12 + (parsed.question.questionEnd - parsed.question.questionStart),
+    "SERVFAIL with question echoes the question section");
+  const qdH = (withQ[4] << 8) | withQ[5];
+  assert(qdH === 1, "SERVFAIL with question: QDCOUNT=1");
+  const flagsW = (withQ[2] << 8) | withQ[3];
+  assert((flagsW & 0x8000) !== 0, "QR set in error response");
+  assert((flagsW & 0x000f) === 2, "rcode=2 (SERVFAIL)");
 }
 
 // ip --------------------------------------------------------------------------------

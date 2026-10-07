@@ -198,7 +198,9 @@ export function buildErrorResponse(fromBuf, rcode, question) {
   const rd = reqFlags & 0x0100;
   const flags = 0x8000 | (reqFlags & 0x7800) | rd | 0x0080 | (rcode & 0x0f);
   writeU16(out, HDR_FLAGS, flags);
-  writeU16(out, HDR_QDCOUNT, 1);
+  // A QDCOUNT of 1 must only be paired with an echoed question section; a
+  // FORMERR for an unparseable query has no question to echo, so declare 0.
+  writeU16(out, HDR_QDCOUNT, question ? 1 : 0);
   writeU16(out, 6, 0); // ANCOUNT
   writeU16(out, 8, 0); // NSCOUNT
   writeU16(out, HDR_ARCOUNT, 0);

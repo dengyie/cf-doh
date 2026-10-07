@@ -280,10 +280,9 @@ git clone https://github.com/dengyie/cf-doh.git && cd cf-doh
 # 2. 签发公网 CA 证书（Let's Encrypt；Android 不信任私有 CA，此步不可省略）
 sudo certbot certonly --standalone -d dns.example.com
 
-# 3. 启动 DoT 服务（监听 853 需要 root 或 CAP_NET_BIND_SERVICE 能力）
-sudo setcap 'cap_net_bind_service=+ep' "$(readlink -f "$(command -v node)")"
-npm run start:dot -- \
-  --cert /etc/letsencrypt/live/dns.example.com/fullchain.pem \
+# 3. 启动 DoT 服务（监听 853 需 root 或 CAP_NET_BIND_SERVICE 能力；
+#    推荐下方 systemd 方式，而非给 node 二进制全局 setcap）
+node src/dot.js --cert /etc/letsencrypt/live/dns.example.com/fullchain.pem \
   --key  /etc/letsencrypt/live/dns.example.com/privkey.pem
 ```
 
@@ -336,7 +335,7 @@ sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/cf-doh-dot.sh
 | 私人 DNS 显示「无法连接」（仅 IPv6-only 网络，如部分运营商 LTE） | `DOT_HOST` 默认 `0.0.0.0` 只监听 IPv4 | 设 `DOT_HOST=::`（Linux 上即 IPv4/IPv6 双栈）并确认域名已有 AAAA 记录 |
 | 配错后手机「全网断网」 | Android 私人 DNS 失败后**不会**自动回退明文 53 解析 | 属系统预期行为：修正服务端（或改回「自动」）即可恢复 |
 
-> 💡 **DoT 专属环境变量**：`DOT_PORT`（默认 853）、`DOT_HOST`（默认 0.0.0.0，需 IPv6 双栈监听时设为 `::`）、`DOT_TLS_CERT` / `DOT_TLS_KEY`（PEM 路径，等价 `--cert` / `--key`）、`DOT_IDLE_TIMEOUT_SECONDS`（默认 30，空闲连接回收）、`DOT_MAX_CONNECTIONS`（默认 128）、`DOT_REFRESH_SECONDS`（默认 21600，规则/黑名单刷新周期）。解析行为（上游、分流、ECS、缓存、DNSSEC）复用上文的 `DOH_*` 系列变量（Node 进程读取同名环境变量）；**例外**：`DOH_TOKEN` 仅对 DoH HTTP 入口生效——DoT 协议没有携带 token 的位置，853 端点需靠安全组/防火墙控制访问，进程启动时若检测到 `DOH_TOKEN` 会打印告警。
+> 💡 **DoT 专属环境变量**：`DOT_PORT`（默认 853）、`DOT_HOST`（默认 0.0.0.0，需 IPv6 双栈监听时设为 `::`）、`DOT_TLS_CERT` / `DOT_TLS_KEY`（PEM 路径，等价 `--cert` / `--key`）、`DOT_IDLE_TIMEOUT_SECONDS`（默认 30，空闲连接回收）、`DOT_MAX_CONNECTIONS`（默认 128）、`DOT_MAX_QPS_PER_IP`（默认 50，每源 IP 每秒查询上限）、`DOT_MAX_CONNECTIONS_PER_IP`（默认 16，每源 IP 并发连接上限）、`DOT_STATS_SECONDS`（默认 60，周期性 metrics JSON 日志，journalctl 可见）、`DOT_REFRESH_SECONDS`（默认 21600，规则/黑名单刷新周期）。解析行为（上游、分流、ECS、缓存、DNSSEC）复用上文的 `DOH_*` 系列变量（Node 进程读取同名环境变量）；**例外**：`DOH_TOKEN` 仅对 DoH HTTP 入口生效——DoT 协议没有携带 token 的位置，853 端点的防滥用由**按源 IP 限速**（`DOT_MAX_QPS_PER_IP` / `DOT_MAX_CONNECTIONS_PER_IP`）承接，可选叠加安全组/防火墙限制（仅当客户端地址稳定时才可靠），进程启动时若检测到 `DOH_TOKEN` 会打印告警。
 
 ---
 

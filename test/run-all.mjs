@@ -7,6 +7,7 @@ const tests = [
   "dns.test.mjs",
   "cache.test.mjs",
   "matcher.test.mjs",
+  "metrics.test.mjs",
   "ratelimit.test.mjs",
   "cache.worker.mjs",
   "routing.mjs",

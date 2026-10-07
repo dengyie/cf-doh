@@ -83,9 +83,26 @@ git clone https://github.com/dengyie/cf-doh.git && cd cf-doh
 # 签发公网 CA 证书（Android 不信任私有 CA，必须 Let's Encrypt 等）
 sudo certbot certonly --standalone -d dns.example.com
 
-# 启动（监听 853 需 root 或 CAP_NET_BIND_SERVICE）
-sudo setcap 'cap_net_bind_service=+ep' "$(readlink -f "$(command -v node)")"
-npm run start:dot -- --cert /etc/letsencrypt/live/dns.example.com/fullchain.pem --key /etc/letsencrypt/live/dns.example.com/privkey.pem
+# 以非 root 用户启动（推荐 systemd + AmbientCapabilities，而非给 node 二进制全局 setcap）：
+# AmbientCapabilities=CAP_NET_BIND_SERVICE  详见下方 systemd 示例
+node src/dot.js --cert /etc/letsencrypt/live/dns.example.com/fullchain.pem \
+                --key  /etc/letsencrypt/live/dns.example.com/privkey.pem
 ```
+
+DoT 专属环境变量（通过 systemd `Environment=` 或直接设置）：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `DOT_PORT` | 853 | 监听端口 |
+| `DOT_HOST` | 0.0.0.0 | 绑定地址（IPv6 双栈用 `::`） |
+| `DOT_TLS_CERT` / `DOT_TLS_KEY` | — | PEM 证书路径（等价 `--cert` / `--key`） |
+| `DOT_IDLE_TIMEOUT_SECONDS` | 30 | 空闲连接回收秒数 |
+| `DOT_MAX_CONNECTIONS` | 128 | 全局并发连接上限 |
+| `DOT_MAX_QPS_PER_IP` | 50 | 每源 IP 每秒查询上限（0=禁用） |
+| `DOT_MAX_CONNECTIONS_PER_IP` | 16 | 每源 IP 并发连接上限（0=禁用） |
+| `DOT_STATS_SECONDS` | 60 | 周期性 metrics JSON 日志间隔（0=禁用，journalctl 可见） |
+| `DOT_REFRESH_SECONDS` | 21600 | 规则 / 黑名单刷新周期 |
+
+与 DoH Worker 共享的解析变量（`DOH_*`）：`DOMESTIC_DOH_URL`、`GLOBAL_DOH_URL`、`RULES_URL`、`ECS_IPV4_PREFIX`、`CACHE_TTL_SECONDS` 等，详见 README。
 
 systemd 守护、证书续期 hook、Android 私人 DNS 配置步骤与常见失败排查，见 [README 的 DoT 章节](README.md#-dot-支持android-私人-dns)。
