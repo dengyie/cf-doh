@@ -201,12 +201,12 @@ Android native Private DNS requires RFC 7858 (DNS-over-TLS on port 853 with vali
 
 ```text
                 ┌─────────────────────────────┐
- DoH (443) ───▶ │  Cloudflare Workers         │──┐
+ DoH (443) ───> │  Cloudflare Workers         │──┐
  RFC 8484       │  src/worker.js              │  │
                 └─────────────────────────────┘  │    Rules / Blocklist / ECS Subnets
-                                                 ├──▶ Concurrent Racing / Caching / DNSSEC
+                                                 ├──> Concurrent Racing / Caching / DNSSEC
                 ┌─────────────────────────────┐  │    (src/core.js, runtime agnostic)
- DoT (853) ───▶ │  VPS / Host Node 18+        │──┘
+ DoT (853) ───> │  VPS / Host Node 18+        │──┘
  RFC 7858       │  src/dot.js (node:tls)      │
                 └─────────────────────────────┘
 ```

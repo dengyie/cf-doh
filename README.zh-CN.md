@@ -237,12 +237,12 @@ kdig -d @doh.yourdomain.com +https=/doh linux.do A
 
 ```text
                 ┌─────────────────────────────┐
- DoH (443) ───▶ │  Cloudflare Workers         │──┐
+ DoH (443) ───> │  Cloudflare Workers         │──┐
  RFC 8484       │  src/worker.js              │  │
                 └─────────────────────────────┘  │    规则分流 / Blocklist / ECS 注入
-                                                 ├──▶ 并发竞价 / 缓存 / DNSSEC 透传
+                                                 ├──> 并发竞价 / 缓存 / DNSSEC 透传
                 ┌─────────────────────────────┐  │    （src/core.js，运行时无关）
- DoT (853) ───▶ │  任意 VPS · Node 18+        │──┘
+ DoT (853) ───> │  任意 VPS · Node 18+        │──┘
  RFC 7858       │  src/dot.js (node:tls)      │
                 └─────────────────────────────┘
 ```
